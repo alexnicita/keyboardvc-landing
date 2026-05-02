@@ -116,6 +116,8 @@ const pianoSamples: PianoSample[] = pianoSampleNotes.map((note) => ({
 let scoreCues: ScoreCue[] = [];
 let scoreScrollCues: ScoreScrollCue[] = [];
 let scoreScrollRange: ScoreScrollRange | null = null;
+let scoreFontLoadPromise: Promise<void> | null = null;
+let scoreRenderPromise: Promise<void> | null = null;
 
 const playButton = document.querySelector<HTMLButtonElement>('#play-button');
 const portfolioButton = document.querySelector<HTMLButtonElement>('#portfolio-button');
@@ -152,6 +154,19 @@ let lastScoreFrameTime = 0;
 let pausedCycleOffset = 0;
 let isPlaying = false;
 
+function loadScoreFonts(): Promise<void> {
+  if (scoreFontLoadPromise) return scoreFontLoadPromise;
+
+  scoreFontLoadPromise = (async () => {
+    if (!('fonts' in document)) return;
+
+    await Promise.all([document.fonts.load('32px Bravura'), document.fonts.load('16px Academico')]);
+    await document.fonts.ready;
+  })();
+
+  return scoreFontLoadPromise;
+}
+
 function createPortfolioList(): void {
   if (!portfolioList) return;
   portfolioList.replaceChildren();
@@ -174,9 +189,11 @@ function createPortfolioList(): void {
   });
 }
 
-function renderLongScore(): void {
+async function renderLongScore(): Promise<void> {
   const container = document.getElementById('long-score');
   if (!container) return;
+
+  await loadScoreFonts();
 
   container.innerHTML = '';
   const measureWidth = 468;
@@ -305,6 +322,13 @@ function commitScoreX(x: number): void {
   scoreTrack.style.setProperty('--score-x', `${x.toFixed(2)}px`);
 }
 
+function freezeScoreTransform(frameTime = performance.now()): void {
+  targetScoreX = currentScoreX;
+  displayedScoreX = currentScoreX;
+  lastScoreFrameTime = frameTime;
+  commitScoreX(currentScoreX);
+}
+
 function setScoreX(x: number, immediate = false, frameTime = performance.now()): void {
   if (!scoreCircle || !scoreTrack) return;
 
@@ -430,6 +454,24 @@ function getScoreXAtOffset(offset: number): number {
   return lastCue.x + (firstCue.x - lastCue.x) * progress;
 }
 
+function getScoreOffsetForX(x: number, preferredOffset = pausedCycleOffset): number {
+  const cycleDuration = getMoonlightCycleDuration();
+  const musicDuration = getMoonlightMusicDuration();
+  const normalizedPreferred = ((preferredOffset % cycleDuration) + cycleDuration) % cycleDuration;
+  if (!scoreScrollRange) return normalizedPreferred;
+
+  const { startX, endX } = scoreScrollRange;
+  if (Math.abs(endX - startX) < 0.001) return normalizedPreferred;
+
+  if (normalizedPreferred > musicDuration && scoreLoopPause > 0) {
+    const resetProgress = Math.max(0, Math.min(1, (x - endX) / (startX - endX)));
+    return musicDuration + resetProgress * scoreLoopPause;
+  }
+
+  const musicProgress = Math.max(0, Math.min(1, (x - startX) / (endX - startX)));
+  return musicProgress * musicDuration;
+}
+
 function setScoreOffset(offset: number, immediate = false, frameTime = performance.now()): void {
   const cycleDuration = getMoonlightCycleDuration();
   const normalizedOffset = ((offset % cycleDuration) + cycleDuration) % cycleDuration;
@@ -480,14 +522,15 @@ function scheduleScoreHighlight(context: AudioContext, noteId: string, start: nu
 
 function startScoreScroll(context: AudioContext, cycleStart: number, cycleDuration: number, offset = 0): void {
   const normalizedOffset = ((offset % cycleDuration) + cycleDuration) % cycleDuration;
+  const frameTime = performance.now();
 
   scoreCycleStartTime = cycleStart - normalizedOffset;
   scoreCycleDuration = cycleDuration;
-  scoreVisualStartTime = performance.now() + Math.max(0, cycleStart - context.currentTime) * 1000;
+  scoreVisualStartTime = frameTime + Math.max(0, cycleStart - context.currentTime) * 1000;
   scoreVisualStartOffset = normalizedOffset;
   cancelScoreScroll();
-  lastScoreFrameTime = 0;
-  setScoreProgress(normalizedOffset / cycleDuration, true);
+  if (!lastScoreFrameTime) lastScoreFrameTime = frameTime;
+  setScoreOffset(normalizedOffset, false, frameTime);
 
   const tick = (now: number): void => {
     if (!isPlaying) return;
@@ -685,6 +728,11 @@ async function loadPianoSamples(context: AudioContext): Promise<boolean> {
   return pianoSampleLoadPromise;
 }
 
+function preloadPianoSamples(): void {
+  const context = ensureAudioContext();
+  void loadPianoSamples(context);
+}
+
 function trackSource(source: AudioScheduledSourceNode): void {
   activeSources.push(source);
   source.onended = () => {
@@ -694,7 +742,7 @@ function trackSource(source: AudioScheduledSourceNode): void {
 
 function stopPlayback(): void {
   if (isPlaying) {
-    pausedCycleOffset = getCurrentCycleOffset();
+    pausedCycleOffset = getScoreOffsetForX(currentScoreX, getCurrentCycleOffset());
   }
 
   activeSources.forEach((source) => {
@@ -708,9 +756,9 @@ function stopPlayback(): void {
   window.clearTimeout(stopTimer);
   cancelScoreScroll();
   clearNoteHighlights();
+  freezeScoreTransform();
   scoreVisualStartTime = 0;
   scoreVisualStartOffset = pausedCycleOffset;
-  setScoreOffset(pausedCycleOffset, true);
   isPlaying = false;
   if (playButton) playButton.textContent = 'Play';
 }
@@ -900,12 +948,11 @@ async function playDisplayedMoonlight(): Promise<void> {
   const context = ensureAudioContext();
   const resumeOffset = pausedCycleOffset;
   isPlaying = true;
-  setScoreProgress(resumeOffset / getMoonlightCycleDuration(), true);
-  if (playButton) playButton.textContent = 'Loading';
+  if (playButton) playButton.textContent = 'Stop';
   await context.resume();
+  await scoreRenderPromise;
   await loadPianoSamples(context);
   if (!isPlaying) return;
-  if (playButton) playButton.textContent = 'Stop';
 
   const cycleStart = context.currentTime + 0.06;
   const cycleDuration = getMoonlightCycleDuration();
@@ -922,8 +969,12 @@ function showPortfolio(): void {
 }
 
 createPortfolioList();
-renderLongScore();
-window.requestAnimationFrame(() => setScoreProgress(0, true));
+scoreRenderPromise = renderLongScore()
+  .then(() => {
+    window.requestAnimationFrame(() => setScoreProgress(0, true));
+  })
+  .catch(() => undefined);
+preloadPianoSamples();
 window.addEventListener('resize', () => {
   window.requestAnimationFrame(() => {
     rebuildScoreScrollCues();
