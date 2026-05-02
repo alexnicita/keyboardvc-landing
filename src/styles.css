@@ -301,6 +301,23 @@ button {
   font-style: italic;
 }
 
+.portfolio-disclaimer {
+  position: fixed;
+  right: var(--padding);
+  bottom: calc(var(--padding) + clamp(2.3rem, 4.2vw, 3rem));
+  left: var(--padding);
+  z-index: 10;
+  margin: 0 auto;
+  color: var(--color-note-black);
+  font-family: var(--font-arial);
+  font-size: clamp(0.68rem, 1.15vw, 0.82rem);
+  font-style: italic;
+  line-height: var(--leading-xs);
+  text-align: center;
+  opacity: 0.48;
+  pointer-events: none;
+}
+
 @media (max-width: 720px) {
   :root {
     --padding: 10px;
