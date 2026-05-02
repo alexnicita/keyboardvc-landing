@@ -126,6 +126,7 @@ const portfolioView = document.querySelector<HTMLElement>('.portfolio-view');
 const portfolioList = document.querySelector<HTMLUListElement>('#portfolio-list');
 const scoreCircle = document.querySelector<HTMLElement>('.score-circle');
 const scoreTrack = document.querySelector<HTMLElement>('#long-score');
+const musicPresents = document.querySelector<HTMLElement>('#music-presents');
 
 let audioContext: AudioContext | null = null;
 let pianoBusContext: AudioContext | null = null;
@@ -761,6 +762,7 @@ function stopPlayback(): void {
   scoreVisualStartOffset = pausedCycleOffset;
   isPlaying = false;
   if (playButton) playButton.textContent = 'Play';
+  if (musicPresents) musicPresents.hidden = true;
 }
 
 function scheduleSampledPianoTone(context: AudioContext, note: string, start: number, duration: number, gainValue: number): boolean {
@@ -953,6 +955,8 @@ async function playDisplayedMoonlight(): Promise<void> {
   await scoreRenderPromise;
   await loadPianoSamples(context);
   if (!isPlaying) return;
+
+  if (musicPresents) musicPresents.hidden = false;
 
   const cycleStart = context.currentTime + 0.06;
   const cycleDuration = getMoonlightCycleDuration();
