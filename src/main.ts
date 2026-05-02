@@ -75,7 +75,7 @@ const scoreSections: ScoreSection[] = [
 
 const portfolioCompanies: PortfolioCompany[] = [
   { name: 'Astro Mechanica', url: 'https://www.astromecha.co/' },
-  { name: 'Spectre Aerospace', url: 'https://www.specteraerospace.com/' },
+  { name: 'Specter Aerospace', url: 'https://www.specteraerospace.com/' },
   { name: 'Machina Labs', url: 'https://www.machinalabs.ai/' },
   { name: 'Rainbow', url: 'https://rainbow.me/' },
   { name: 'Rox', url: 'https://www.rox.com/' }
