@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Keyboard VC | Classical venture capital for frontier technologies</title>
+    <meta
+      name="description"
+      content="Alex Nicita's personal venture investments. Classical venture capital for frontier technologies."
+    />
+    <meta name="author" content="Alex Nicita" />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://keyboardvc.com/" />
+    <meta property="og:title" content="Keyboard VC" />
+    <meta
+      property="og:description"
+      content="Alex Nicita's personal venture investments. Classical venture capital for frontier technologies."
+    />
+    <meta property="og:url" content="https://keyboardvc.com/" />
+    <meta property="og:site_name" content="Keyboard VC" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Keyboard VC" />
+    <meta
+      name="twitter:description"
+      content="Alex Nicita's personal venture investments. Classical venture capital for frontier technologies."
+    />
+    <meta name="theme-color" content="#f4f4f4" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell" data-view="music">
+      <header class="intro">
+        <h1><a href="/">Keyboard VC</a></h1>
+        <h2>Personal venture investments</h2>
+        <p>
+          <em>presents:</em>
+          <span>Moonlight Sonata</span>
+          <em>third movement</em>
+          <span>Op.27 No.2</span>
+        </p>
+      </header>
+
+      <main>
+        <section class="music-view" aria-label="Moonlight Sonata third movement score art">
+          <div class="score-circle" aria-hidden="true">
+            <div id="long-score" class="long-score"></div>
+          </div>
+        </section>
+
+        <section class="portfolio-view" aria-hidden="true">
+          <ul id="portfolio-list" class="portfolio-list"></ul>
+        </section>
+
+        <button id="play-button" class="play-button" type="button">Play</button>
+      </main>
+
+      <button id="portfolio-button" class="portfolio-button" type="button">
+        <span>Show</span>
+        Portfolio
+      </button>
+      <div class="copyright">© 2026</div>
+    </div>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
