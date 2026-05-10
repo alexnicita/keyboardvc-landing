@@ -17,7 +17,7 @@
   --text-xs: 10px;
   --leading-xs: 1;
   --font-weight-regular: 400;
-  --padding: 8px;
+  --padding: clamp(18px, 2.4vw, 28px);
   background: var(--color-canvas-white);
 }
 
@@ -79,19 +79,22 @@ button:focus-visible {
 .intro {
   position: fixed;
   top: var(--padding);
-  left: 0;
+  left: 50%;
   z-index: 20;
-  max-width: 430px;
-  padding-left: var(--padding);
+  width: max-content;
+  max-width: calc(100vw - var(--padding) * 2);
+  padding-inline: var(--padding);
   color: var(--color-ghost-white);
   font-family: var(--font-neue-haas-unica-w01-regular);
   mix-blend-mode: difference;
   opacity: 1;
-  transform: translateY(0);
+  text-align: center;
+  transform: translateX(-50%);
   transition:
-    opacity 520ms ease,
-    transform 520ms ease,
-    filter 520ms ease;
+    top 980ms cubic-bezier(0.19, 1, 0.22, 1),
+    opacity 760ms ease,
+    transform 980ms cubic-bezier(0.19, 1, 0.22, 1),
+    filter 980ms ease;
 }
 
 .intro h1,
@@ -122,6 +125,13 @@ button:focus-visible {
   font-weight: var(--font-weight-regular);
   line-height: 0.84;
   -webkit-font-smoothing: auto;
+  transition: font-size 980ms cubic-bezier(0.19, 1, 0.22, 1);
+}
+
+.intro-title {
+  display: inline-block;
+  min-width: 10.6ch;
+  white-space: nowrap;
 }
 
 .intro span:first-of-type {
@@ -148,6 +158,34 @@ button:focus-visible {
   filter: blur(0);
 }
 
+.page-shell[data-loading="true"] .intro {
+  top: 50%;
+  color: var(--color-note-black);
+  mix-blend-mode: normal;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(1.04);
+}
+
+.page-shell[data-loading="true"] .intro em {
+  font-size: clamp(2.75rem, 5.8vw, 5.25rem);
+  line-height: 0.9;
+}
+
+.page-shell[data-loading="true"] .intro-title {
+  visibility: hidden;
+}
+
+.page-shell[data-loading="true"] .intro-title.is-typing {
+  visibility: visible;
+}
+
+.page-shell[data-loading="true"] .music-view {
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.9);
+  filter: blur(18px);
+}
+
 .portfolio-view {
   opacity: 0;
   pointer-events: none;
@@ -164,7 +202,7 @@ button:focus-visible {
 .page-shell[data-view="portfolio"] .intro {
   opacity: 0;
   pointer-events: none;
-  transform: translateY(-10px);
+  transform: translateX(-50%) translateY(-10px);
   filter: blur(8px);
 }
 
@@ -196,10 +234,16 @@ button:focus-visible {
 .score-globe-overlay {
   position: absolute;
   inset: 0;
+  z-index: 1;
   display: block;
   width: 100%;
   height: 100%;
   opacity: 0;
+  transition: opacity 360ms ease;
+}
+
+.score-globe-overlay {
+  z-index: 2;
 }
 
 .score-globe-canvas.is-ready,
@@ -229,6 +273,12 @@ button:focus-visible {
   font-size: clamp(1.72rem, 2.5vw, 2rem);
   line-height: 1;
   mix-blend-mode: difference;
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity 920ms ease 180ms,
+    transform 1100ms cubic-bezier(0.19, 1, 0.22, 1) 180ms,
+    filter 920ms ease 180ms;
 }
 
 .play-button {
@@ -254,6 +304,24 @@ button:focus-visible {
   font-size: var(--text-xs);
   line-height: var(--leading-xs);
   transform: translateX(-50%);
+  transition:
+    opacity 920ms ease 220ms,
+    transform 1100ms cubic-bezier(0.19, 1, 0.22, 1) 220ms,
+    filter 920ms ease 220ms;
+}
+
+.page-shell[data-loading="true"] .play-button,
+.page-shell[data-loading="true"] .portfolio-button {
+  opacity: 0;
+  pointer-events: none;
+  filter: blur(8px);
+  transform: translateY(18px);
+}
+
+.page-shell[data-loading="true"] .copyright {
+  opacity: 0;
+  filter: blur(6px);
+  transform: translateX(-50%) translateY(12px);
 }
 
 .portfolio-list {
@@ -322,7 +390,7 @@ button:focus-visible {
 
 @media (max-width: 720px) {
   :root {
-    --padding: 10px;
+    --padding: 16px;
   }
 
   .intro {

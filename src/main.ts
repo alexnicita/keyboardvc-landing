@@ -167,6 +167,8 @@ const portfolioCompanies: PortfolioCompany[] = [
 const moonlightTempo = 156;
 const sixteenthDuration = 60 / moonlightTempo / 4;
 const scoreLoopPause = 0.82;
+const initialTitleTypingDuration = 1650;
+const initialTitleFinalHoldDuration = 520;
 const scoreMeasureWidth = 468;
 const scoreTextureSourceHeight = 286;
 const scoreTextureHorizontalPadding = 260;
@@ -228,6 +230,7 @@ const portfolioView = document.querySelector<HTMLElement>('.portfolio-view');
 const portfolioList = document.querySelector<HTMLUListElement>('#portfolio-list');
 const scoreCircle = document.querySelector<HTMLElement>('.score-circle');
 const scoreMount = document.querySelector<HTMLElement>('#long-score');
+const introTitle = document.querySelector<HTMLElement>('.intro-title');
 const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 let audioContext: AudioContext | null = null;
@@ -269,6 +272,9 @@ let scoreVisualStartTime = 0;
 let scoreVisualStartOffset = 0;
 let pausedCycleOffset = 0;
 let isPlaying = false;
+let isPlaybackStarting = false;
+let initialTitleTypingPromise: Promise<void> | null = null;
+let initialTitleCompleteTime = 0;
 const globeView: GlobeViewState = {
   manualLongitude: 0,
   manualLatitude: -8,
@@ -709,10 +715,8 @@ function buildMelodyMotionCues(): MelodyMotionCue[] {
   const midiNotes = trebleNotes.map(noteToMidi).filter((midi): midi is number => midi !== null);
   if (midiNotes.length === 0) return [];
 
-  const minMidi = Math.min(...midiNotes);
-  const maxMidi = Math.max(...midiNotes);
-  const centerMidi = (minMidi + maxMidi) / 2;
-  const halfRange = Math.max(1, (maxMidi - minMidi) / 2);
+  const anchorMidi = midiNotes[0];
+  const melodyRange = Math.max(1, ...midiNotes.map((midi) => Math.abs(midi - anchorMidi)));
   const cues: MelodyMotionCue[] = [];
   let sectionOffset = 0;
 
@@ -723,7 +727,7 @@ function buildMelodyMotionCues(): MelodyMotionCue[] {
 
       cues.push({
         offset: sectionOffset + noteIndex * sixteenthDuration,
-        tilt: clamp(((midi - centerMidi) / halfRange) * melodyTiltDegrees, -melodyTiltDegrees, melodyTiltDegrees)
+        tilt: clamp(((midi - anchorMidi) / melodyRange) * melodyTiltDegrees, -melodyTiltDegrees, melodyTiltDegrees)
       });
     });
 
@@ -1116,7 +1120,9 @@ function resizeGlobeCanvas(): void {
   if (!scoreCircle || !globeCanvas || !globeContext || !globeProjection) return;
 
   const rect = scoreCircle.getBoundingClientRect();
-  const cssSize = Math.max(1, Math.round(Math.min(rect.width, rect.height)));
+  const layoutWidth = scoreCircle.clientWidth || scoreCircle.offsetWidth || rect.width;
+  const layoutHeight = scoreCircle.clientHeight || scoreCircle.offsetHeight || rect.height;
+  const cssSize = Math.max(1, Math.round(Math.min(layoutWidth, layoutHeight)));
   const dpr = Math.min(Math.max(window.devicePixelRatio || 1, minGlobeDevicePixelRatio), maxGlobeDevicePixelRatio);
   const width = isGlobeMotionActive()
     ? Math.max(1, Math.min(maxMotionGlobeBackingSize, Math.round(cssSize * motionGlobeBackingScale)))
@@ -1600,7 +1606,6 @@ function startScoreScroll(context: AudioContext, cycleStart: number, cycleDurati
   scoreVisualStartOffset = normalizedOffset;
   cancelScoreScroll();
   resizeGlobeCanvas();
-  globeView.melodyLatitude = getMelodyLatitudeTarget(normalizedOffset);
   renderScoreGlobe(normalizedOffset);
   startGlobeFrameLoop();
 }
@@ -1806,6 +1811,7 @@ function stopPlayback(): void {
     pausedCycleOffset = getCurrentCycleOffset();
   }
 
+  isPlaybackStarting = false;
   isPlaying = false;
   activeSources.forEach((source) => {
     try {
@@ -2002,25 +2008,25 @@ function scheduleNextLoop(context: AudioContext, nextStart: number): void {
 }
 
 async function playDisplayedMoonlight(): Promise<void> {
-  if (isPlaying) {
+  if (isPlaying || isPlaybackStarting) {
     stopPlayback();
     return;
   }
 
   const context = ensureAudioContext();
   const resumeOffset = pausedCycleOffset;
-  isPlaying = true;
+  isPlaybackStarting = true;
   if (playButton) playButton.textContent = 'Stop';
   await context.resume();
   await scoreRenderPromise;
   await loadPianoSamples(context);
-  if (!isPlaying) return;
-
-  refreshScoreLayout();
+  if (!isPlaybackStarting) return;
 
   const cycleStart = context.currentTime + 0.06;
   const cycleDuration = getMoonlightCycleDuration();
   const nextStart = scheduleMoonlightCycle(context, cycleStart, resumeOffset);
+  isPlaying = true;
+  isPlaybackStarting = false;
   startScoreScroll(context, cycleStart, cycleDuration, resumeOffset);
   scheduleNextLoop(context, nextStart);
 }
@@ -2032,13 +2038,77 @@ function showPortfolio(): void {
   portfolioView.setAttribute('aria-hidden', nextView === 'portfolio' ? 'false' : 'true');
 }
 
+function startInitialTitleTyping(): Promise<void> {
+  if (initialTitleTypingPromise) return initialTitleTypingPromise;
+  if (!introTitle) return Promise.resolve();
+
+  const title = introTitle.dataset.title ?? introTitle.textContent ?? 'Keyboard VC';
+  introTitle.classList.add('is-typing');
+
+  if (prefersReducedMotion) {
+    introTitle.textContent = title;
+    initialTitleCompleteTime = performance.now();
+    initialTitleTypingPromise = Promise.resolve();
+    return initialTitleTypingPromise;
+  }
+
+  introTitle.textContent = '';
+  initialTitleTypingPromise = new Promise((resolve) => {
+    const initialDelay = 160;
+    const stepDuration = initialTitleTypingDuration / Math.max(1, title.length);
+    let index = 0;
+
+    const typeNextLetter = (): void => {
+      index += 1;
+      introTitle.textContent = title.slice(0, index);
+
+      if (index >= title.length) {
+        initialTitleCompleteTime = performance.now();
+        resolve();
+        return;
+      }
+
+      window.setTimeout(typeNextLetter, stepDuration);
+    };
+
+    window.setTimeout(typeNextLetter, initialDelay);
+  });
+
+  return initialTitleTypingPromise;
+}
+
+async function waitForInitialTitleTyping(): Promise<void> {
+  await startInitialTitleTyping();
+
+  if (prefersReducedMotion) return;
+
+  const remaining = Math.max(0, initialTitleFinalHoldDuration - (performance.now() - initialTitleCompleteTime));
+  if (remaining <= 0) return;
+
+  await new Promise<void>((resolve) => {
+    window.setTimeout(resolve, remaining);
+  });
+}
+
+function revealLoadedPage(): void {
+  if (introTitle) {
+    introTitle.textContent = introTitle.dataset.title ?? 'Keyboard VC';
+    introTitle.classList.add('is-typing');
+  }
+  pageShell?.removeAttribute('data-loading');
+}
+
 createPortfolioList();
+void startInitialTitleTyping();
 scoreRenderPromise = renderGlobeScore()
-  .then(() => {
+  .then(async () => {
+    await waitForInitialTitleTyping();
+    revealLoadedPage();
     window.requestAnimationFrame(refreshScoreLayout);
   })
   .catch((error: unknown) => {
     console.error(error);
+    revealLoadedPage();
   });
 preloadPianoSamples();
 reducedMotionQuery.addEventListener('change', (event) => {
