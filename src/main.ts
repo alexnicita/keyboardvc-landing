@@ -127,8 +127,6 @@ const portfolioView = document.querySelector<HTMLElement>('.portfolio-view');
 const portfolioList = document.querySelector<HTMLUListElement>('#portfolio-list');
 const scoreCircle = document.querySelector<HTMLElement>('.score-circle');
 const scoreTrack = document.querySelector<HTMLElement>('#long-score');
-const intro = document.querySelector<HTMLElement>('.intro');
-const musicPresents = document.querySelector<HTMLElement>('#music-presents');
 
 let audioContext: AudioContext | null = null;
 let pianoBusContext: AudioContext | null = null;
@@ -382,42 +380,7 @@ function getScoreScrollLead(): number {
   return circleWidth * smallScreenAmount * 0.02;
 }
 
-function getIntroClearanceBox(): DOMRect {
-  if (!intro || !musicPresents?.hidden) return intro?.getBoundingClientRect() ?? new DOMRect();
-
-  const previousVisibility = musicPresents.style.visibility;
-  musicPresents.hidden = false;
-  musicPresents.style.visibility = 'hidden';
-  const reservedBox = intro.getBoundingClientRect();
-  musicPresents.hidden = true;
-  musicPresents.style.visibility = previousVisibility;
-
-  return reservedBox;
-}
-
-function updateScoreClearance(): void {
-  if (!intro) return;
-
-  const introBox = getIntroClearanceBox();
-  const gap = Math.max(8, window.innerHeight * 0.015);
-  const safeTop = introBox.bottom + gap;
-  const isMobile = window.matchMedia('(max-width: 720px)').matches;
-  const baseShiftY = isMobile ? window.innerHeight * 0.04 : 0;
-  const viewportDiameter = isMobile
-    ? Math.min(window.innerWidth * 0.9, window.innerHeight - 220)
-    : Math.min(Math.min(window.innerWidth, window.innerHeight) * 0.76, window.innerWidth - 40, 760);
-  const minimumDiameter = Math.min(isMobile ? 280 : 340, viewportDiameter);
-  const safeDiameter = window.innerHeight + baseShiftY * 2 - safeTop * 2;
-  const diameter = Math.max(minimumDiameter, Math.min(viewportDiameter, safeDiameter));
-  const topWithBaseShift = (window.innerHeight - diameter) / 2 + baseShiftY;
-  const extraShiftY = Math.max(0, safeTop - topWithBaseShift);
-
-  document.documentElement.style.setProperty('--score-safe-diameter', `${diameter.toFixed(2)}px`);
-  document.documentElement.style.setProperty('--score-extra-offset-y', `${extraShiftY.toFixed(2)}px`);
-}
-
 function refreshScoreLayout(): void {
-  updateScoreClearance();
   rebuildScoreScrollCues();
   setScoreOffset(isPlaying ? getCurrentCycleOffset() : pausedCycleOffset, true);
 }
@@ -751,7 +714,7 @@ function ensureAudioContext(): AudioContext {
 }
 
 function createConcertHallImpulse(context: AudioContext): AudioBuffer {
-  const duration = 3.35;
+  const duration = 4.85;
   const length = Math.floor(context.sampleRate * duration);
   const impulse = context.createBuffer(2, length, context.sampleRate);
 
@@ -760,9 +723,9 @@ function createConcertHallImpulse(context: AudioContext): AudioBuffer {
     let smoothed = 0;
     for (let index = 0; index < length; index += 1) {
       const progress = index / length;
-      const earlyReflection = index < context.sampleRate * 0.075 ? 0.38 : 1;
-      const tail = (1 - progress) ** 4.15;
-      smoothed = smoothed * 0.74 + (Math.random() * 2 - 1) * 0.26;
+      const earlyReflection = index < context.sampleRate * 0.09 ? 0.28 : 1;
+      const tail = (1 - progress) ** 3.15;
+      smoothed = smoothed * 0.82 + (Math.random() * 2 - 1) * 0.18;
       data[index] = smoothed * tail * earlyReflection;
     }
   }
@@ -785,30 +748,30 @@ function ensurePianoBus(context: AudioContext): NonNullable<typeof pianoBus> {
   const compressor = context.createDynamicsCompressor();
   const master = context.createGain();
 
-  dry.gain.value = 0.92;
-  hallInput.gain.value = 0.2;
-  preDelay.delayTime.value = 0.026;
+  dry.gain.value = 0.76;
+  hallInput.gain.value = 0.36;
+  preDelay.delayTime.value = 0.038;
   convolver.buffer = createConcertHallImpulse(context);
   hallFilter.type = 'lowpass';
-  hallFilter.frequency.value = 5600;
-  hallFilter.Q.value = 0.32;
-  hallReturn.gain.value = 0.2;
+  hallFilter.frequency.value = 4300;
+  hallFilter.Q.value = 0.26;
+  hallReturn.gain.value = 0.44;
   body.type = 'lowshelf';
   body.frequency.value = 170;
-  body.gain.value = 1.6;
+  body.gain.value = 2.1;
   presence.type = 'peaking';
-  presence.frequency.value = 3200;
-  presence.Q.value = 0.88;
-  presence.gain.value = -1.8;
+  presence.frequency.value = 2850;
+  presence.Q.value = 0.82;
+  presence.gain.value = -2.8;
   air.type = 'highshelf';
-  air.frequency.value = 5200;
-  air.gain.value = -3.4;
-  compressor.threshold.value = -9;
-  compressor.knee.value = 28;
-  compressor.ratio.value = 1.55;
-  compressor.attack.value = 0.018;
-  compressor.release.value = 0.42;
-  master.gain.value = 0.74;
+  air.frequency.value = 4800;
+  air.gain.value = -5.2;
+  compressor.threshold.value = -10;
+  compressor.knee.value = 32;
+  compressor.ratio.value = 1.42;
+  compressor.attack.value = 0.028;
+  compressor.release.value = 0.58;
+  master.gain.value = 0.7;
 
   dry.connect(body);
   body.connect(presence);
@@ -918,7 +881,6 @@ function stopPlayback(): void {
   scoreVisualStartOffset = pausedCycleOffset;
   isPlaying = false;
   if (playButton) playButton.textContent = 'Play';
-  if (musicPresents) musicPresents.hidden = true;
   refreshScoreLayout();
 }
 
@@ -938,26 +900,26 @@ function scheduleSampledPianoTone(context: AudioContext, note: string, start: nu
   const hallSend = context.createGain();
   const frequency = noteToFrequency(note);
   const pitchDistance = Math.abs(midi - sample.midi);
-  const tail = Math.min(5.2, Math.max(1.85, 3.9 - Math.log2(frequency / 440) * 0.32));
+  const tail = Math.min(6.6, Math.max(2.45, 4.75 - Math.log2(frequency / 440) * 0.28));
   const stopAt = start + duration + tail;
-  const releaseStart = Math.max(start + 0.024, stopAt - 0.42);
+  const releaseStart = Math.max(start + 0.036, stopAt - 0.78);
   const noteBody = Math.max(0.82, 1 - pitchDistance * 0.045);
-  const brightness = Math.min(9800, Math.max(3600, frequency * 8.6));
-  const pianoGain = gainValue * noteBody * 2.25;
+  const brightness = Math.min(7600, Math.max(2400, frequency * 6.4));
+  const pianoGain = gainValue * noteBody * 1.95;
 
   source.buffer = buffer;
   source.playbackRate.setValueAtTime(2 ** ((midi - sample.midi) / 12), start);
 
   envelope.gain.setValueAtTime(0.0001, start);
-  envelope.gain.linearRampToValueAtTime(pianoGain, start + 0.011);
+  envelope.gain.linearRampToValueAtTime(pianoGain, start + 0.018);
   envelope.gain.setValueAtTime(pianoGain, releaseStart);
   envelope.gain.exponentialRampToValueAtTime(0.0001, stopAt);
 
   filter.type = 'lowpass';
   filter.frequency.setValueAtTime(brightness, start);
-  filter.Q.setValueAtTime(0.28, start);
-  panner.pan.setValueAtTime(Math.max(-0.26, Math.min(0.26, Math.log2(frequency / 261.63) * 0.12)), start);
-  hallSend.gain.setValueAtTime(0.24, start);
+  filter.Q.setValueAtTime(0.22, start);
+  panner.pan.setValueAtTime(Math.max(-0.22, Math.min(0.22, Math.log2(frequency / 261.63) * 0.1)), start);
+  hallSend.gain.setValueAtTime(0.42, start);
 
   source.connect(envelope);
   envelope.connect(filter);
@@ -967,7 +929,7 @@ function scheduleSampledPianoTone(context: AudioContext, note: string, start: nu
   hallSend.connect(bus.hallInput);
 
   source.start(start);
-  source.stop(stopAt + 0.08);
+  source.stop(stopAt + 0.14);
   trackSource(source);
   return true;
 }
@@ -988,22 +950,22 @@ function scheduleSynthPianoTone(context: AudioContext, note: string, start: numb
     [3.012, 0.095],
     [4.032, 0.038]
   ];
-  const brightness = Math.min(5400, Math.max(1500, frequency * 7.2));
-  const tail = Math.min(3.2, Math.max(1.15, 2.05 - Math.log2(frequency / 440) * 0.2));
+  const brightness = Math.min(4200, Math.max(1200, frequency * 5.6));
+  const tail = Math.min(4.1, Math.max(1.6, 2.85 - Math.log2(frequency / 440) * 0.18));
   const stopAt = start + duration + tail;
 
   voice.gain.setValueAtTime(0.0001, start);
-  voice.gain.linearRampToValueAtTime(gainValue * 0.82, start + 0.012);
-  voice.gain.exponentialRampToValueAtTime(gainValue * 0.2, start + duration + 0.18);
+  voice.gain.linearRampToValueAtTime(gainValue * 0.7, start + 0.02);
+  voice.gain.exponentialRampToValueAtTime(gainValue * 0.18, start + duration + 0.26);
   voice.gain.exponentialRampToValueAtTime(0.0001, stopAt);
 
   filter.type = 'lowpass';
   filter.frequency.setValueAtTime(brightness, start);
-  filter.frequency.exponentialRampToValueAtTime(Math.max(1200, brightness * 0.46), start + duration + tail * 0.48);
-  filter.Q.setValueAtTime(0.42, start);
+  filter.frequency.exponentialRampToValueAtTime(Math.max(900, brightness * 0.42), start + duration + tail * 0.55);
+  filter.Q.setValueAtTime(0.34, start);
 
-  panner.pan.setValueAtTime(Math.max(-0.24, Math.min(0.24, Math.log2(frequency / 261.63) * 0.11)), start);
-  hallSend.gain.setValueAtTime(0.22, start);
+  panner.pan.setValueAtTime(Math.max(-0.2, Math.min(0.2, Math.log2(frequency / 261.63) * 0.09)), start);
+  hallSend.gain.setValueAtTime(0.4, start);
 
   voice.connect(filter);
   filter.connect(panner);
@@ -1036,8 +998,8 @@ function scheduleSynthPianoTone(context: AudioContext, note: string, start: numb
   hammerFilter.type = 'bandpass';
   hammerFilter.frequency.setValueAtTime(Math.min(5200, Math.max(1400, frequency * 5)), start);
   hammerFilter.Q.setValueAtTime(0.8, start);
-  hammerGain.gain.setValueAtTime(gainValue * 0.11, start);
-  hammerGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.034);
+  hammerGain.gain.setValueAtTime(gainValue * 0.075, start);
+  hammerGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.045);
 
   hammer.connect(hammerFilter);
   hammerFilter.connect(hammerGain);
@@ -1113,7 +1075,6 @@ async function playDisplayedMoonlight(): Promise<void> {
   await loadPianoSamples(context);
   if (!isPlaying) return;
 
-  if (musicPresents) musicPresents.hidden = false;
   refreshScoreLayout();
 
   const cycleStart = context.currentTime + 0.06;
@@ -1141,7 +1102,5 @@ window.addEventListener('resize', () => {
   window.requestAnimationFrame(refreshScoreLayout);
 });
 window.visualViewport?.addEventListener('resize', () => window.requestAnimationFrame(refreshScoreLayout));
-const introResizeObserver = 'ResizeObserver' in window ? new ResizeObserver(() => window.requestAnimationFrame(refreshScoreLayout)) : null;
-if (intro) introResizeObserver?.observe(intro);
 playButton?.addEventListener('click', () => void playDisplayedMoonlight());
 portfolioButton?.addEventListener('click', showPortfolio);
