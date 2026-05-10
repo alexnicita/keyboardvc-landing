@@ -61,6 +61,14 @@ button {
   padding: 0;
 }
 
+button:focus:not(:focus-visible) {
+  outline: none;
+}
+
+button:focus-visible {
+  outline: none;
+}
+
 .page-shell {
   position: fixed;
   inset: 0;
@@ -170,51 +178,45 @@ button {
   position: relative;
   width: min(76vmin, calc(100vw - 40px), 760px);
   aspect-ratio: 1;
-  overflow: hidden;
-  border: 1px solid rgba(0, 0, 0, 0.24);
-  border-radius: 50%;
-  background: var(--color-canvas-white);
-  clip-path: circle(50% at 50% 50%);
+  overflow: visible;
+  background: transparent;
   isolation: isolate;
-  -webkit-mask-image: radial-gradient(circle, #000 99.5%, transparent 100%);
-  mask-image: radial-gradient(circle, #000 99.5%, transparent 100%);
 }
 
 .long-score {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  width: clamp(1500px, 208vw, 2180px);
-  mix-blend-mode: multiply;
-  transform: translate3d(calc(-50% + var(--score-x, 0px)), -50%, 0);
-  transform-origin: center;
-  will-change: transform;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
 }
 
-.long-score svg {
+.score-globe-canvas,
+.score-globe-overlay {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  height: auto;
-  overflow: visible;
+  height: 100%;
+  opacity: 0;
 }
 
-.long-score svg * {
-  vector-effect: non-scaling-stroke;
+.score-globe-canvas.is-ready,
+.score-globe-overlay.is-ready {
+  opacity: 1;
 }
 
-.score-note,
-.score-note * {
-  transition:
-    fill 150ms ease,
-    stroke 150ms ease,
-    filter 150ms ease;
+.score-globe-overlay,
+.score-globe-canvas {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
 }
 
-.score-note.is-playing,
-.score-note.is-playing * {
-  fill: #24394d !important;
-  stroke: #24394d !important;
-  filter: drop-shadow(0 0 2px rgba(36, 57, 77, 0.18));
+.score-globe-canvas.is-dragging,
+.score-globe-overlay.is-dragging {
+  cursor: grabbing;
 }
 
 .play-button,
@@ -342,11 +344,6 @@ button {
   .score-circle {
     width: min(86vw, calc(100vh - 220px));
     min-width: 300px;
-  }
-
-  .long-score {
-    width: 1320px;
-    transform: translate3d(calc(-50% + var(--score-x, 0px)), -50%, 0);
   }
 
   .portfolio-list {

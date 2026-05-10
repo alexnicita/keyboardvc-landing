@@ -1,4 +1,10 @@
-import { Factory, StaveConnector } from 'vexflow/bravura';
+import { drag, type D3DragEvent } from 'd3-drag';
+import { geoOrthographic, geoPath, type GeoPermissibleObjects, type GeoProjection } from 'd3-geo';
+import { select } from 'd3-selection';
+import { timer, type Timer } from 'd3-timer';
+
+type VexFlowRuntime = typeof import('vexflow/bravura');
+type VexFlowFactory = InstanceType<VexFlowRuntime['Factory']>;
 
 type ScoreSection = {
   treble: string;
@@ -25,14 +31,92 @@ type ScoreCue = {
   weight: number;
 };
 
-type ScoreScrollCue = {
+type MelodyMotionCue = {
   offset: number;
-  x: number;
+  tilt: number;
 };
 
-type ScoreScrollRange = {
-  startX: number;
-  endX: number;
+type GlobeTrack = 'treble' | 'bass';
+
+type GlobePitch = {
+  latitude: number;
+};
+
+type GlobeNote = {
+  noteId: string;
+  track: GlobeTrack;
+  offset: number;
+  duration: number;
+  longitude: number;
+  pitches: GlobePitch[];
+  weight: number;
+};
+
+type GlobeRotation = {
+  longitude: number;
+  latitude: number;
+};
+
+type GlobeViewState = {
+  manualLongitude: number;
+  manualLatitude: number;
+  melodyLatitude: number;
+  idleLongitude: number;
+  velocityLongitude: number;
+  velocityLatitude: number;
+  lastFrameTime: number;
+  isDragging: boolean;
+};
+
+type ProjectedPoint = {
+  x: number;
+  y: number;
+  depth: number;
+  edgeFade: number;
+};
+
+type VisibleGlobeNote = {
+  note: GlobeNote;
+  depth: number;
+};
+
+type ScoreTexture = {
+  data: ImageData;
+  width: number;
+  height: number;
+  latitudeTop: number;
+  latitudeBottom: number;
+  visibleRows: Uint8Array;
+  staffLineLatitudes: number[];
+};
+
+type GlobeProjectionMap = {
+  size: number;
+  pitch: number;
+  textureHeight: number;
+  outputIndexes: Uint32Array;
+  baseLongitudes: Float32Array;
+  sourceYs: Float32Array;
+  textureVisibility: Float32Array;
+};
+
+type GlobeWebGLState = {
+  gl: WebGL2RenderingContext;
+  program: WebGLProgram;
+  positionBuffer: WebGLBuffer;
+  texture: WebGLTexture | null;
+  textureReady: boolean;
+  maxTextureSize: number;
+  uniforms: {
+    resolution: WebGLUniformLocation | null;
+    rotation: WebGLUniformLocation | null;
+    radius: WebGLUniformLocation | null;
+    latTop: WebGLUniformLocation | null;
+    latBottom: WebGLUniformLocation | null;
+    texture: WebGLUniformLocation | null;
+    staffCount: WebGLUniformLocation | null;
+    staffLatitudes: WebGLUniformLocation | null;
+  };
 };
 
 const scoreSections: ScoreSection[] = [
@@ -83,7 +167,23 @@ const portfolioCompanies: PortfolioCompany[] = [
 const moonlightTempo = 156;
 const sixteenthDuration = 60 / moonlightTempo / 4;
 const scoreLoopPause = 0.82;
-const scoreSmoothingMs = 58;
+const scoreMeasureWidth = 468;
+const scoreTextureSourceHeight = 286;
+const scoreTextureHorizontalPadding = 260;
+const scoreTextureVerticalPadding = 54;
+const globeSpherePadding = 0.018;
+const scoreTextureLatitudeTop = 38;
+const scoreTextureLatitudeBottom = -38;
+const scoreTextureBackingScale = 5;
+const minGlobeDevicePixelRatio = 2.65;
+const maxGlobeBackingSize = 2160;
+const maxGlobeDevicePixelRatio = 2.65;
+const motionGlobeBackingScale = minGlobeDevicePixelRatio;
+const maxMotionGlobeBackingSize = maxGlobeBackingSize;
+const maxStaffLineUniforms = 16;
+const melodyTiltDegrees = 4.2;
+const melodyTiltSmoothing = 9.5;
+const globeSphere: GeoPermissibleObjects = { type: 'Sphere' };
 const pianoSampleNotes = [
   'D#1',
   'F#1',
@@ -114,9 +214,10 @@ const pianoSamples: PianoSample[] = pianoSampleNotes.map((note) => ({
   url: `/audio/salamander/${encodeURIComponent(note)}v8.ogg`
 }));
 let scoreCues: ScoreCue[] = [];
-let scoreScrollCues: ScoreScrollCue[] = [];
-let scoreScrollAnchors: ScoreScrollCue[] = [];
-let scoreScrollRange: ScoreScrollRange | null = null;
+let melodyMotionCues: MelodyMotionCue[] = [];
+let globeNotesById = new Map<string, GlobeNote>();
+let scoreTexture: ScoreTexture | null = null;
+let vexFlowModulePromise: Promise<VexFlowRuntime> | null = null;
 let scoreFontLoadPromise: Promise<void> | null = null;
 let scoreRenderPromise: Promise<void> | null = null;
 
@@ -126,7 +227,8 @@ const pageShell = document.querySelector<HTMLElement>('.page-shell');
 const portfolioView = document.querySelector<HTMLElement>('.portfolio-view');
 const portfolioList = document.querySelector<HTMLUListElement>('#portfolio-list');
 const scoreCircle = document.querySelector<HTMLElement>('.score-circle');
-const scoreTrack = document.querySelector<HTMLElement>('#long-score');
+const scoreMount = document.querySelector<HTMLElement>('#long-score');
+const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 let audioContext: AudioContext | null = null;
 let pianoBusContext: AudioContext | null = null;
@@ -142,31 +244,41 @@ let useSampledPiano = false;
 const pianoSampleBuffers = new Map<string, AudioBuffer>();
 let activeSources: AudioScheduledSourceNode[] = [];
 let activeHighlightTimers: number[] = [];
+let activeGlobeNoteIds = new Set<string>();
 let stopTimer = 0;
-let scoreAnimationFrame = 0;
+let globeMusicLongitudeStart = -172;
+let globeMusicLongitudeSpan = 344;
+let globeFrameTimer: Timer | null = null;
+let globeCanvas: HTMLCanvasElement | null = null;
+let globeContext: CanvasRenderingContext2D | null = null;
+let globeOverlayCanvas: HTMLCanvasElement | null = null;
+let globeProjection: GeoProjection | null = null;
+let globeWebGLState: GlobeWebGLState | null = null;
+let globeSize = 0;
+let globeCssSize = 0;
+let globeTextureCanvas: HTMLCanvasElement | null = null;
+let globeTextureContext: CanvasRenderingContext2D | null = null;
+let globeFrameImage: ImageData | null = null;
+let globeProjectionMap: GlobeProjectionMap | null = null;
+let lastGlobeRenderTime = 0;
+let prefersReducedMotion = reducedMotionQuery.matches;
+let visibleGlobeNotes: VisibleGlobeNote[] = [];
 let scoreCycleStartTime = 0;
 let scoreCycleDuration = 0;
 let scoreVisualStartTime = 0;
 let scoreVisualStartOffset = 0;
-let currentScoreX = 0;
-let displayedScoreX = 0;
-let targetScoreX = 0;
-let lastScoreFrameTime = 0;
 let pausedCycleOffset = 0;
 let isPlaying = false;
-
-function loadScoreFonts(): Promise<void> {
-  if (scoreFontLoadPromise) return scoreFontLoadPromise;
-
-  scoreFontLoadPromise = (async () => {
-    if (!('fonts' in document)) return;
-
-    await Promise.all([document.fonts.load('32px Bravura'), document.fonts.load('16px Academico')]);
-    await document.fonts.ready;
-  })();
-
-  return scoreFontLoadPromise;
-}
+const globeView: GlobeViewState = {
+  manualLongitude: 0,
+  manualLatitude: -8,
+  melodyLatitude: 0,
+  idleLongitude: 0,
+  velocityLongitude: 0,
+  velocityLatitude: 0,
+  lastFrameTime: 0,
+  isDragging: false
+};
 
 function createPortfolioList(): void {
   if (!portfolioList) return;
@@ -190,32 +302,348 @@ function createPortfolioList(): void {
   });
 }
 
-async function renderLongScore(): Promise<void> {
-  const container = document.getElementById('long-score');
-  if (!container) return;
+async function renderGlobeScore(): Promise<void> {
+  if (!scoreCircle || !scoreMount) return;
 
-  await loadScoreFonts();
+  const canvas = document.createElement('canvas');
+  const overlayCanvas = document.createElement('canvas');
+  const webGLState = createGlobeWebGLState(canvas);
+  const context = webGLState ? overlayCanvas.getContext('2d', { alpha: true }) : canvas.getContext('2d', { alpha: true });
+  if (!context) return;
 
-  container.innerHTML = '';
-  const measureWidth = 468;
-  const width = measureWidth * scoreSections.length + 64;
-  const height = 286;
-  const factory = new Factory({
-    renderer: {
-      elementId: 'long-score',
-      width,
-      height
-    }
+  canvas.className = 'score-globe-canvas';
+  canvas.setAttribute('aria-hidden', 'true');
+  canvas.setAttribute('role', 'presentation');
+  overlayCanvas.className = 'score-globe-overlay';
+  overlayCanvas.setAttribute('aria-hidden', 'true');
+  overlayCanvas.setAttribute('role', 'presentation');
+  scoreMount.replaceChildren(canvas);
+  if (webGLState) {
+    scoreMount.append(overlayCanvas);
+  }
+  scoreMount.setAttribute('aria-hidden', 'true');
+
+  globeCanvas = canvas;
+  globeOverlayCanvas = webGLState ? overlayCanvas : null;
+  globeContext = context;
+  globeWebGLState = webGLState;
+  globeProjection = geoOrthographic().precision(0.45);
+  attachGlobeDrag(webGLState ? overlayCanvas : canvas);
+  resizeGlobeCanvas();
+  renderCurrentGlobeFrame();
+  await renderScoreTexture();
+  uploadGlobeWebGLTexture();
+  await warmGlobeRenderer();
+  renderCurrentGlobeFrame();
+  canvas.classList.add('is-ready');
+  overlayCanvas.classList.add('is-ready');
+}
+
+function createGlobeWebGLState(canvas: HTMLCanvasElement): GlobeWebGLState | null {
+  const gl = canvas.getContext('webgl2', {
+    alpha: true,
+    antialias: true,
+    depth: false,
+    powerPreference: 'high-performance',
+    premultipliedAlpha: true,
+    preserveDrawingBuffer: false,
+    stencil: false
   });
+  if (!gl) return null;
 
+  const vertexShader = compileGlobeShader(
+    gl,
+    gl.VERTEX_SHADER,
+    `#version 300 es
+    in vec2 a_position;
+
+    void main() {
+      gl_Position = vec4(a_position, 0.0, 1.0);
+    }`
+  );
+  const fragmentShader = compileGlobeShader(
+    gl,
+    gl.FRAGMENT_SHADER,
+    `#version 300 es
+    precision highp float;
+
+    uniform vec2 u_resolution;
+    uniform vec2 u_rotation;
+    uniform float u_radius;
+    uniform float u_latTop;
+    uniform float u_latBottom;
+    uniform sampler2D u_scoreTexture;
+    uniform int u_staffCount;
+    uniform float u_staffLatitudes[${maxStaffLineUniforms}];
+
+    out vec4 outColor;
+
+    const float PI = 3.141592653589793;
+    const vec3 PAGE_COLOR = vec3(231.0 / 255.0, 227.0 / 255.0, 221.0 / 255.0);
+    const vec3 ORB_COLOR = vec3(252.0 / 255.0, 251.0 / 255.0, 248.0 / 255.0);
+
+    float smootherStep(float value) {
+      float x = clamp(value, 0.0, 1.0);
+      return x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
+    }
+
+    void main() {
+      vec2 center = u_resolution * 0.5;
+      vec2 pixel = vec2(gl_FragCoord.x, u_resolution.y - gl_FragCoord.y);
+      vec2 normalized = vec2((pixel.x - center.x) / u_radius, (center.y - pixel.y) / u_radius);
+      float radiusSquared = dot(normalized, normalized);
+
+      if (radiusSquared > 1.0) {
+        discard;
+      }
+
+      float depth = sqrt(1.0 - radiusSquared);
+      float pitch = -u_rotation.y * PI / 180.0;
+      float cosPitch = cos(pitch);
+      float sinPitch = sin(pitch);
+      float unrotatedY = normalized.y * cosPitch + depth * sinPitch;
+      float unrotatedZ = -normalized.y * sinPitch + depth * cosPitch;
+      float latitude = asin(clamp(unrotatedY, -1.0, 1.0)) * 180.0 / PI;
+      float sphereEdge = sqrt(radiusSquared);
+      float bodyBlend = smootherStep((0.78 - sphereEdge) / 0.5);
+      float whiteBody = 0.62 * bodyBlend;
+      float light = mix(1.0, clamp(0.996 + depth * 0.016 - normalized.x * 0.003 + normalized.y * 0.002, 0.99, 1.014), bodyBlend);
+      vec3 orbBase = mix(PAGE_COLOR, ORB_COLOR, whiteBody) * light;
+      vec4 base = vec4(orbBase, 1.0);
+
+      float staffAlpha = 0.0;
+      if (depth > 0.12) {
+        float staffFade = smootherStep((depth - 0.16) / 0.36);
+        float latitudeWidth = max(fwidth(latitude) * 0.94, 0.025);
+
+        for (int index = 0; index < ${maxStaffLineUniforms}; index += 1) {
+          if (index >= u_staffCount) {
+            break;
+          }
+          float distanceToLine = abs(latitude - u_staffLatitudes[index]);
+          float line = 1.0 - smoothstep(0.0, latitudeWidth, distanceToLine);
+          staffAlpha = max(staffAlpha, line * staffFade * 0.32);
+        }
+      }
+
+      if (latitude <= u_latTop && latitude >= u_latBottom) {
+        float baseLongitude = atan(normalized.x, unrotatedZ) * 180.0 / PI;
+        float longitude = baseLongitude - u_rotation.x;
+        longitude = mod(longitude + 540.0, 360.0) - 180.0;
+        float latitudeProgress = (u_latTop - latitude) / (u_latTop - u_latBottom);
+        vec2 textureUv = vec2((longitude + 180.0) / 360.0, latitudeProgress);
+        float limbFade = smootherStep((depth - 0.22) / 0.24);
+        float textureVisibility = limbFade * clamp(depth * 1.22 + 0.08, 0.0, 1.0);
+        vec4 score = texture(u_scoreTexture, textureUv);
+        score.a *= textureVisibility;
+        base.rgb = mix(base.rgb, score.rgb, score.a);
+      }
+
+      if (staffAlpha > 0.0) {
+        base.rgb = mix(base.rgb, vec3(18.0 / 255.0, 19.0 / 255.0, 19.0 / 255.0), staffAlpha);
+      }
+
+      outColor = base;
+    }`
+  );
+  if (!vertexShader || !fragmentShader) return null;
+
+  const program = gl.createProgram();
+  if (!program) return null;
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.bindAttribLocation(program, 0, 'a_position');
+  gl.linkProgram(program);
+  gl.deleteShader(vertexShader);
+  gl.deleteShader(fragmentShader);
+
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    gl.deleteProgram(program);
+    return null;
+  }
+
+  const positionBuffer = gl.createBuffer();
+  if (!positionBuffer) {
+    gl.deleteProgram(program);
+    return null;
+  }
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
+  gl.useProgram(program);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.disable(gl.BLEND);
+
+  return {
+    gl,
+    program,
+    positionBuffer,
+    texture: null,
+    textureReady: false,
+    maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
+    uniforms: {
+      resolution: gl.getUniformLocation(program, 'u_resolution'),
+      rotation: gl.getUniformLocation(program, 'u_rotation'),
+      radius: gl.getUniformLocation(program, 'u_radius'),
+      latTop: gl.getUniformLocation(program, 'u_latTop'),
+      latBottom: gl.getUniformLocation(program, 'u_latBottom'),
+      texture: gl.getUniformLocation(program, 'u_scoreTexture'),
+      staffCount: gl.getUniformLocation(program, 'u_staffCount'),
+      staffLatitudes: gl.getUniformLocation(program, 'u_staffLatitudes')
+    }
+  };
+}
+
+function compileGlobeShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader | null {
+  const shader = gl.createShader(type);
+  if (!shader) return null;
+
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    gl.deleteShader(shader);
+    return null;
+  }
+
+  return shader;
+}
+
+function uploadGlobeWebGLTexture(): void {
+  if (!globeWebGLState || !scoreTexture) return;
+  const { gl } = globeWebGLState;
+
+  if (scoreTexture.width > globeWebGLState.maxTextureSize || scoreTexture.height > globeWebGLState.maxTextureSize) {
+    globeWebGLState.textureReady = false;
+    return;
+  }
+
+  globeWebGLState.texture ??= gl.createTexture();
+  if (!globeWebGLState.texture) return;
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, globeWebGLState.texture);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, scoreTexture.width, scoreTexture.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, scoreTexture.data.data);
+  globeWebGLState.textureReady = true;
+}
+
+async function warmGlobeRenderer(): Promise<void> {
+  if (!scoreTexture || !globeSize) return;
+
+  const previousOffset = pausedCycleOffset;
+  const warmFrameCount = globeWebGLState?.textureReady ? 18 : 3;
+  const musicDuration = getMoonlightMusicDuration();
+
+  for (let frame = 0; frame < warmFrameCount; frame += 1) {
+    const offset = musicDuration * (frame / warmFrameCount);
+    renderScoreGlobe(offset);
+
+    if (frame % 6 === 5) {
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    }
+  }
+
+  renderScoreGlobe(previousOffset);
+  globeWebGLState?.gl.finish();
+}
+
+function getTrebleNoteId(sectionIndex: number, noteIndex: number): string {
+  return `score-t-${sectionIndex}-${noteIndex}`;
+}
+
+function getBassNoteId(sectionIndex: number, noteIndex: number): string {
+  return `score-b-${sectionIndex}-${noteIndex}`;
+}
+
+function loadVexFlowModule(): Promise<VexFlowRuntime> {
+  vexFlowModulePromise ??= import('vexflow/bravura');
+
+  return vexFlowModulePromise;
+}
+
+async function loadScoreFonts(vexflow: VexFlowRuntime): Promise<void> {
+  scoreFontLoadPromise ??= (async () => {
+    vexflow.default.setFonts('Bravura', 'Academico');
+    await Promise.race([
+      Promise.all([document.fonts.load('30pt Bravura'), document.fonts.load('16pt Academico'), document.fonts.ready]).then(() => undefined),
+      new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 1600);
+      })
+    ]);
+  })();
+
+  return scoreFontLoadPromise;
+}
+
+async function renderScoreTexture(): Promise<void> {
+  const vexflow = await loadVexFlowModule();
+  await loadScoreFonts(vexflow);
+
+  const stage = document.createElement('div');
+  const stageId = `score-texture-${Date.now().toString(36)}`;
+  stage.id = stageId;
+  stage.style.position = 'fixed';
+  stage.style.left = '-10000px';
+  stage.style.top = '0';
+  stage.style.width = `${scoreMeasureWidth * scoreSections.length + scoreTextureHorizontalPadding * 2}px`;
+  stage.style.height = `${scoreTextureSourceHeight + scoreTextureVerticalPadding * 2}px`;
+  stage.style.overflow = 'hidden';
+  document.body.append(stage);
+
+  try {
+    const width = scoreMeasureWidth * scoreSections.length + scoreTextureHorizontalPadding * 2;
+    const height = scoreTextureSourceHeight + scoreTextureVerticalPadding * 2;
+    const factory = new vexflow.Factory({
+      renderer: {
+        elementId: stageId,
+        width,
+        height
+      }
+    });
+
+    drawVexFlowScore(factory, vexflow.StaveConnector, scoreTextureHorizontalPadding, scoreTextureVerticalPadding);
+    factory.draw();
+    buildScoreCues();
+
+    const svg = stage.querySelector<SVGSVGElement>('svg');
+    if (!svg) return;
+
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+    buildGlobeNotesFromRenderedScore(svg);
+    updateGlobeMusicLongitudeRange();
+    scoreTexture = await renderCanvasScoreTexture(width, height, vexflow, getRenderedStaffLineLatitudes(svg));
+  } finally {
+    stage.remove();
+  }
+}
+
+function drawVexFlowScore(
+  factory: VexFlowFactory,
+  StaveConnectorClass: VexFlowRuntime['StaveConnector'],
+  offsetX = 0,
+  offsetY = 0
+): void {
   const score = factory.EasyScore();
 
   scoreSections.forEach((section, index) => {
-    const x = 18 + index * measureWidth;
+    const x = offsetX + 18 + index * scoreMeasureWidth;
     const system = factory.System({
       x,
-      y: 18,
-      width: measureWidth,
+      y: offsetY + 18,
+      width: scoreMeasureWidth,
       spaceBetweenStaves: 14
     });
     const trebleNotes = score.notes(section.treble, { stem: 'up' });
@@ -234,52 +662,25 @@ async function renderLongScore(): Promise<void> {
     if (index === 0) {
       trebleStave.addClef('treble').addKeySignature('C#m').addTimeSignature('4/4');
       bassStave.addClef('bass').addKeySignature('C#m').addTimeSignature('4/4');
-      system.addConnector().setType(StaveConnector.type.BRACE);
+      system.addConnector().setType(StaveConnectorClass.type.BRACE);
     }
 
-    system.addConnector().setType(StaveConnector.type.SINGLE_LEFT);
+    system.addConnector().setType(StaveConnectorClass.type.SINGLE_LEFT);
 
     [0, 4, 8, 12].forEach((start) => {
       const beam = factory.Beam({ notes: trebleNotes.slice(start, start + 4) });
       beam.renderOptions.flatBeams = true;
     });
   });
-
-  factory.draw();
-
-  scoreSections.forEach((section, sectionIndex) => {
-    section.audioTreble.forEach((_, noteIndex) => getRenderedScoreNote(getTrebleNoteId(sectionIndex, noteIndex))?.classList.add('score-note'));
-    section.audioBass.forEach((_, noteIndex) => getRenderedScoreNote(getBassNoteId(sectionIndex, noteIndex))?.classList.add('score-note'));
-  });
-
-  buildScoreCues();
-  rebuildScoreScrollCues();
-
-  const svg = container.querySelector('svg');
-  svg?.setAttribute('aria-hidden', 'true');
-  svg?.setAttribute('focusable', 'false');
-  svg?.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-}
-
-function getTrebleNoteId(sectionIndex: number, noteIndex: number): string {
-  return `score-t-${sectionIndex}-${noteIndex}`;
-}
-
-function getBassNoteId(sectionIndex: number, noteIndex: number): string {
-  return `score-b-${sectionIndex}-${noteIndex}`;
-}
-
-function getRenderedScoreNote(noteId: string): HTMLElement | SVGElement | null {
-  return document.getElementById(noteId) ?? document.getElementById(`vf-${noteId}`);
 }
 
 function buildScoreCues(): void {
-  scoreCues = [];
+  const cues: ScoreCue[] = [];
   let sectionOffset = 0;
 
   scoreSections.forEach((section, sectionIndex) => {
     section.audioTreble.forEach((_, noteIndex) => {
-      scoreCues.push({
+      cues.push({
         noteId: getTrebleNoteId(sectionIndex, noteIndex),
         offset: sectionOffset + noteIndex * sixteenthDuration,
         duration: sixteenthDuration * 2.3,
@@ -288,7 +689,7 @@ function buildScoreCues(): void {
     });
 
     section.audioBass.forEach((_, beat) => {
-      scoreCues.push({
+      cues.push({
         noteId: getBassNoteId(sectionIndex, beat),
         offset: sectionOffset + beat * sixteenthDuration * 4,
         duration: sixteenthDuration * 8.6,
@@ -299,7 +700,305 @@ function buildScoreCues(): void {
     sectionOffset += sixteenthDuration * 16;
   });
 
-  scoreCues.sort((a, b) => a.offset - b.offset);
+  scoreCues = cues.sort((a, b) => a.offset - b.offset);
+  melodyMotionCues = buildMelodyMotionCues();
+}
+
+function buildMelodyMotionCues(): MelodyMotionCue[] {
+  const trebleNotes = scoreSections.flatMap((section) => section.audioTreble);
+  const midiNotes = trebleNotes.map(noteToMidi).filter((midi): midi is number => midi !== null);
+  if (midiNotes.length === 0) return [];
+
+  const minMidi = Math.min(...midiNotes);
+  const maxMidi = Math.max(...midiNotes);
+  const centerMidi = (minMidi + maxMidi) / 2;
+  const halfRange = Math.max(1, (maxMidi - minMidi) / 2);
+  const cues: MelodyMotionCue[] = [];
+  let sectionOffset = 0;
+
+  scoreSections.forEach((section) => {
+    section.audioTreble.forEach((note, noteIndex) => {
+      const midi = noteToMidi(note);
+      if (midi === null) return;
+
+      cues.push({
+        offset: sectionOffset + noteIndex * sixteenthDuration,
+        tilt: clamp(((midi - centerMidi) / halfRange) * melodyTiltDegrees, -melodyTiltDegrees, melodyTiltDegrees)
+      });
+    });
+
+    sectionOffset += sixteenthDuration * 16;
+  });
+
+  return cues.sort((a, b) => a.offset - b.offset);
+}
+
+function buildGlobeNotesFromRenderedScore(svg: SVGSVGElement): void {
+  const viewBox = svg.viewBox.baseVal;
+  const viewBoxWidth = viewBox.width || Number(svg.getAttribute('width')) || 1;
+  const viewBoxHeight = viewBox.height || Number(svg.getAttribute('height')) || 1;
+  const notes = scoreCues.map((cue) => {
+    const renderedNote = getRenderedScoreNote(svg, cue.noteId);
+    const box = renderedNote?.getBBox();
+    const track: GlobeTrack = cue.noteId.startsWith('score-t') ? 'treble' : 'bass';
+    const fallbackProgress = getMoonlightMusicDuration() ? clamp(cue.offset / getMoonlightMusicDuration(), 0, 1) : 0;
+    const centerX = box ? (box.x + box.width / 2) / viewBoxWidth : fallbackProgress;
+    const centerY = box ? (box.y + box.height / 2) / viewBoxHeight : track === 'treble' ? 0.34 : 0.66;
+    const notePitches = getCuePitchNames(cue.noteId);
+    const renderedNoteheadYs = renderedNote ? getRenderedNoteheadYProgresses(renderedNote, viewBoxHeight, notePitches.length) : [];
+    const pitches =
+      renderedNoteheadYs.length === notePitches.length && notePitches.length > 1
+        ? renderedNoteheadYs.map((yProgress) => ({ latitude: getLatitudeFromYProgress(yProgress) }))
+        : track === 'bass' && notePitches.length > 1
+          ? getChordGlobePitches(notePitches, centerY, viewBoxHeight)
+          : [{ latitude: getLatitudeFromYProgress(centerY) }];
+
+    return {
+      noteId: cue.noteId,
+      track,
+      offset: cue.offset,
+      duration: cue.duration,
+      longitude: -180 + centerX * 360,
+      pitches,
+      weight: cue.weight
+    };
+  });
+
+  globeNotesById = new Map(notes.map((note) => [note.noteId, note]));
+}
+
+function getRenderedNoteheadYProgresses(renderedNote: SVGGraphicsElement, viewBoxHeight: number, expectedCount: number): number[] {
+  if (expectedCount <= 1) return [];
+
+  const candidates = Array.from(renderedNote.querySelectorAll<SVGGraphicsElement>('path, ellipse, rect, use'))
+    .map((element) => {
+      const box = element.getBBox();
+
+      return {
+        y: (box.y + box.height / 2) / viewBoxHeight,
+        width: box.width,
+        height: box.height
+      };
+    })
+    .filter(({ width, height }) => width >= 5 && width <= 24 && height >= 4 && height <= 18)
+    .sort((a, b) => a.y - b.y);
+
+  const centers: number[] = [];
+  candidates.forEach((candidate) => {
+    if (centers.every((center) => Math.abs(center - candidate.y) > 0.006)) {
+      centers.push(candidate.y);
+    }
+  });
+
+  if (centers.length < expectedCount) return [];
+  if (centers.length === expectedCount) return centers;
+
+  const stride = (centers.length - 1) / (expectedCount - 1);
+  return Array.from({ length: expectedCount }, (_, index) => centers[Math.round(index * stride)]);
+}
+
+function getRenderedStaffLineLatitudes(svg: SVGSVGElement): number[] {
+  const viewBox = svg.viewBox.baseVal;
+  const viewBoxHeight = viewBox.height || Number(svg.getAttribute('height')) || 1;
+  const minLineWidth = scoreMeasureWidth * 0.62;
+  const yProgresses: number[] = [];
+
+  Array.from(svg.querySelectorAll<SVGGraphicsElement>('path, line, rect')).forEach((element) => {
+    const box = element.getBBox();
+    if (box.width < minLineWidth || box.height > 2.8) return;
+
+    const yProgress = (box.y + box.height / 2) / viewBoxHeight;
+    if (yProgresses.every((existing) => Math.abs(existing - yProgress) > 0.004)) {
+      yProgresses.push(yProgress);
+    }
+  });
+
+  return yProgresses.sort((a, b) => a - b).map(getLatitudeFromYProgress);
+}
+
+function getCuePitchNames(noteId: string): string[] {
+  const [, track, rawSectionIndex, rawNoteIndex] = /^score-([tb])-(\d+)-(\d+)$/.exec(noteId) ?? [];
+  const sectionIndex = Number(rawSectionIndex);
+  const noteIndex = Number(rawNoteIndex);
+  const section = scoreSections[sectionIndex];
+
+  if (!section) return [];
+  if (track === 't') return [section.audioTreble[noteIndex]].filter(Boolean);
+  if (track === 'b') return section.audioBass[noteIndex] ?? [];
+  return [];
+}
+
+function getChordGlobePitches(notes: string[], centerY: number, viewBoxHeight: number): GlobePitch[] {
+  const diatonicIndexes = notes.map(getDiatonicPitchIndex).filter((index): index is number => index !== null);
+  if (diatonicIndexes.length !== notes.length || diatonicIndexes.length === 0) {
+    return [{ latitude: getLatitudeFromYProgress(centerY) }];
+  }
+
+  const averagePitch = diatonicIndexes.reduce((sum, index) => sum + index, 0) / diatonicIndexes.length;
+  const staffStepY = viewBoxHeight * 0.0126;
+
+  return diatonicIndexes.map((pitchIndex) => ({
+    latitude: getLatitudeFromYProgress(centerY + ((averagePitch - pitchIndex) * staffStepY) / viewBoxHeight)
+  }));
+}
+
+function getLatitudeFromYProgress(yProgress: number): number {
+  return scoreTextureLatitudeTop - clamp(yProgress, 0, 1) * (scoreTextureLatitudeTop - scoreTextureLatitudeBottom);
+}
+
+function getDiatonicPitchIndex(note: string): number | null {
+  const match = /^([a-g])([#b]?)(-?\d)$/i.exec(note);
+  if (!match) return null;
+
+  const [, rawPitch, , rawOctave] = match;
+  const pitchClass: Record<string, number> = {
+    c: 0,
+    d: 1,
+    e: 2,
+    f: 3,
+    g: 4,
+    a: 5,
+    b: 6
+  };
+  const pitch = pitchClass[rawPitch.toLowerCase()];
+  const octave = Number(rawOctave);
+
+  return octave * 7 + pitch;
+}
+
+function updateGlobeMusicLongitudeRange(): void {
+  const firstCue = scoreCues[0];
+  const lastCue = scoreCues[scoreCues.length - 1];
+  const firstNote = firstCue ? globeNotesById.get(firstCue.noteId) : null;
+  const lastNote = lastCue ? globeNotesById.get(lastCue.noteId) : null;
+
+  if (!firstNote || !lastNote) return;
+
+  globeMusicLongitudeStart = firstNote.longitude;
+  globeMusicLongitudeSpan = Math.max(24, lastNote.longitude - firstNote.longitude);
+}
+
+function getRenderedScoreNote(svg: SVGSVGElement, noteId: string): SVGGraphicsElement | null {
+  const direct = svg.querySelector<SVGGraphicsElement>(`#${noteId}`);
+  return direct ?? svg.querySelector<SVGGraphicsElement>(`#vf-${noteId}`);
+}
+
+async function renderCanvasScoreTexture(
+  sourceWidth: number,
+  sourceHeight: number,
+  vexflow: VexFlowRuntime,
+  staffLineLatitudes: number[]
+): Promise<ScoreTexture> {
+  const sourceCanvas = document.createElement('canvas');
+  sourceCanvas.id = `score-canvas-texture-${Date.now().toString(36)}`;
+  sourceCanvas.style.position = 'fixed';
+  sourceCanvas.style.left = '-10000px';
+  sourceCanvas.style.top = '0';
+  sourceCanvas.style.width = `${sourceWidth}px`;
+  sourceCanvas.style.height = `${sourceHeight}px`;
+  document.body.append(sourceCanvas);
+
+  try {
+    const factory = new vexflow.Factory({
+      renderer: {
+        elementId: sourceCanvas.id,
+        backend: vexflow.Renderer.Backends.CANVAS,
+        width: sourceWidth,
+        height: sourceHeight
+      }
+    });
+
+    (factory.getContext() as { resize(width: number, height: number, devicePixelRatio?: number): unknown }).resize(
+      sourceWidth,
+      sourceHeight,
+      scoreTextureBackingScale
+    );
+    drawVexFlowScore(factory, vexflow.StaveConnector, scoreTextureHorizontalPadding, scoreTextureVerticalPadding);
+    factory.draw();
+
+    const context = sourceCanvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('Unable to create score texture context.');
+    const data = context.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+    removeStaffLineTexturePixels(data, staffLineLatitudes);
+
+    return {
+      data,
+      width: sourceCanvas.width,
+      height: sourceCanvas.height,
+      latitudeTop: scoreTextureLatitudeTop,
+      latitudeBottom: scoreTextureLatitudeBottom,
+      visibleRows: getScoreTextureVisibleRows(data),
+      staffLineLatitudes
+    };
+  } finally {
+    sourceCanvas.remove();
+  }
+}
+
+function removeStaffLineTexturePixels(image: ImageData, staffLineLatitudes: number[]): void {
+  const latitudeSpan = scoreTextureLatitudeTop - scoreTextureLatitudeBottom;
+  const lineHalfHeight = Math.max(1, Math.round(scoreTextureBackingScale * 0.45));
+  const probeHalfHeight = Math.max(4, Math.round(scoreTextureBackingScale * 1.5));
+
+  staffLineLatitudes.forEach((latitude) => {
+    const row = Math.round(((scoreTextureLatitudeTop - latitude) / latitudeSpan) * (image.height - 1));
+    const startY = Math.max(0, row - lineHalfHeight);
+    const endY = Math.min(image.height - 1, row + lineHalfHeight);
+
+    for (let y = startY; y <= endY; y += 1) {
+      for (let x = 0; x < image.width; x += 1) {
+        const alphaIndex = (y * image.width + x) * 4 + 3;
+        if (image.data[alphaIndex] <= 8) continue;
+
+        let verticalSupport = 0;
+        const probeStart = Math.max(0, y - probeHalfHeight);
+        const probeEnd = Math.min(image.height - 1, y + probeHalfHeight);
+
+        for (let probeY = probeStart; probeY <= probeEnd; probeY += 1) {
+          if (Math.abs(probeY - y) <= lineHalfHeight) continue;
+          if (image.data[(probeY * image.width + x) * 4 + 3] > 18) {
+            verticalSupport += 1;
+          }
+        }
+
+        if (verticalSupport <= 1) {
+          image.data[alphaIndex - 3] = 0;
+          image.data[alphaIndex - 2] = 0;
+          image.data[alphaIndex - 1] = 0;
+          image.data[alphaIndex] = 0;
+        }
+      }
+    }
+  });
+}
+
+function getScoreTextureVisibleRows(image: ImageData): Uint8Array {
+  const rows = new Uint8Array(image.height);
+  const expandedRows = new Uint8Array(image.height);
+  const alphaCounts = new Uint32Array(image.height);
+  const rowExpansion = Math.max(2, Math.round(scoreTextureBackingScale * 0.9));
+  const staffCoverageLimit = image.width * 0.18;
+
+  for (let index = 3; index < image.data.length; index += 4) {
+    if (image.data[index] <= 8) continue;
+    alphaCounts[Math.floor(index / 4 / image.width)] += 1;
+  }
+
+  alphaCounts.forEach((alphaCount, row) => {
+    if (!alphaCount || alphaCount > staffCoverageLimit) return;
+    rows[row] = 1;
+  });
+
+  rows.forEach((visible, row) => {
+    if (!visible) return;
+    const start = Math.max(0, row - rowExpansion);
+    const end = Math.min(image.height - 1, row + rowExpansion);
+    for (let expandedRow = start; expandedRow <= end; expandedRow += 1) {
+      expandedRows[expandedRow] = 1;
+    }
+  });
+
+  return expandedRows;
 }
 
 function getMoonlightCycleDuration(): number {
@@ -316,316 +1015,567 @@ function smootherStep(progress: number): number {
   return clamped * clamped * clamped * (clamped * (clamped * 6 - 15) + 10);
 }
 
-function commitScoreX(x: number): void {
-  if (!scoreTrack) return;
-
-  currentScoreX = x;
-  scoreTrack.style.setProperty('--score-x', `${x.toFixed(2)}px`);
+function getGlobeMusicLongitude(offset: number): number {
+  const musicDuration = getMoonlightMusicDuration();
+  const progress = musicDuration ? clamp(offset / musicDuration, 0, 1) : 0;
+  return globeMusicLongitudeStart + globeMusicLongitudeSpan * progress;
 }
 
-function freezeScoreTransform(frameTime = performance.now()): void {
-  targetScoreX = currentScoreX;
-  displayedScoreX = currentScoreX;
-  lastScoreFrameTime = frameTime;
-  commitScoreX(currentScoreX);
-}
+function getGlobeCycleLongitude(offset: number): number {
+  const cycleDuration = getMoonlightCycleDuration();
+  const normalizedOffset = ((offset % cycleDuration) + cycleDuration) % cycleDuration;
+  const musicDuration = getMoonlightMusicDuration();
 
-function setScoreX(x: number, immediate = false, frameTime = performance.now()): void {
-  if (!scoreCircle || !scoreTrack) return;
-
-  targetScoreX = x;
-
-  if (immediate || !lastScoreFrameTime) {
-    displayedScoreX = x;
-    lastScoreFrameTime = frameTime;
-    commitScoreX(displayedScoreX);
-    return;
+  if (normalizedOffset <= musicDuration || scoreLoopPause <= 0) {
+    return getGlobeMusicLongitude(normalizedOffset);
   }
 
-  const delta = Math.max(0, Math.min(80, frameTime - lastScoreFrameTime));
-  const smoothing = 1 - Math.exp(-delta / scoreSmoothingMs);
+  const resetProgress = smootherStep((normalizedOffset - musicDuration) / scoreLoopPause);
+  return globeMusicLongitudeStart + globeMusicLongitudeSpan + (360 - globeMusicLongitudeSpan) * resetProgress;
+}
 
-  lastScoreFrameTime = frameTime;
-  displayedScoreX += (targetScoreX - displayedScoreX) * smoothing;
+function getMelodyLatitudeTarget(offset: number): number {
+  if (prefersReducedMotion || melodyMotionCues.length === 0) return 0;
 
-  if (Math.abs(targetScoreX - displayedScoreX) < 0.02) {
-    displayedScoreX = targetScoreX;
+  const cycleDuration = getMoonlightCycleDuration();
+  const musicDuration = getMoonlightMusicDuration();
+  const normalizedOffset = ((offset % cycleDuration) + cycleDuration) % cycleDuration;
+  if (normalizedOffset > musicDuration) return 0;
+
+  const firstCue = melodyMotionCues[0];
+  if (normalizedOffset <= firstCue.offset) return firstCue.tilt;
+
+  for (let index = 0; index < melodyMotionCues.length - 1; index += 1) {
+    const currentCue = melodyMotionCues[index];
+    const nextCue = melodyMotionCues[index + 1];
+    if (normalizedOffset < currentCue.offset || normalizedOffset > nextCue.offset) continue;
+
+    const cueSpan = Math.max(0.001, nextCue.offset - currentCue.offset);
+    const progress = smootherStep((normalizedOffset - currentCue.offset) / cueSpan);
+    return currentCue.tilt + (nextCue.tilt - currentCue.tilt) * progress;
   }
 
-  commitScoreX(displayedScoreX);
+  const lastCue = melodyMotionCues[melodyMotionCues.length - 1];
+  const releaseProgress = smootherStep((normalizedOffset - lastCue.offset) / Math.max(0.001, musicDuration - lastCue.offset));
+  return lastCue.tilt * (1 - releaseProgress);
 }
 
-function getFallbackScoreX(progress: number): number {
-  if (!scoreCircle || !scoreTrack) return currentScoreX;
+function updateMelodyLatitude(offset: number, deltaSeconds: number): void {
+  const activeTarget = isPlaying ? getMelodyLatitudeTarget(offset) : 0;
+  const dragBlend = globeView.isDragging ? 0.35 : 1;
+  const target = activeTarget * dragBlend;
+  const blend = 1 - Math.exp(-deltaSeconds * melodyTiltSmoothing);
 
-  const scoreWidth = scoreTrack.offsetWidth;
-  const circleWidth = scoreCircle.clientWidth;
-  const inset = Math.max(14, circleWidth * 0.07);
-  const travel = Math.max(0, scoreWidth - circleWidth);
-  const startX = travel / 2 + inset;
-  const endX = -travel / 2 - inset;
-  const clampedProgress = Math.max(0, Math.min(1, progress));
-
-  return startX + (endX - startX) * clampedProgress;
+  globeView.melodyLatitude += (target - globeView.melodyLatitude) * blend;
+  if (!isPlaying && Math.abs(globeView.melodyLatitude) < 0.001) {
+    globeView.melodyLatitude = 0;
+  }
 }
 
-function getScoreScrollLead(): number {
-  if (!scoreCircle) return 0;
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
 
-  const circleWidth = scoreCircle.clientWidth;
-  const minCircle = 300;
-  const maxCircle = 760;
-  const smallScreenAmount = 1 - Math.max(0, Math.min(1, (circleWidth - minCircle) / (maxCircle - minCircle)));
+function normalizeLongitude(value: number): number {
+  return ((((value + 180) % 360) + 360) % 360) - 180;
+}
 
-  return circleWidth * smallScreenAmount * 0.02;
+function toRadians(degrees: number): number {
+  return (degrees * Math.PI) / 180;
+}
+
+function attachGlobeDrag(canvas: HTMLCanvasElement): void {
+  const globeDrag = drag<HTMLCanvasElement, unknown>()
+    .on('start', () => {
+      globeView.isDragging = true;
+      globeView.velocityLongitude = 0;
+      globeView.velocityLatitude = 0;
+      canvas.classList.add('is-dragging');
+      startGlobeFrameLoop();
+    })
+    .on('drag', (event: D3DragEvent<HTMLCanvasElement, unknown, unknown>) => {
+      const sizeFactor = globeCssSize ? clamp(760 / globeCssSize, 0.82, 1.65) : 1;
+      const longitudeDelta = event.dx * 0.32 * sizeFactor;
+      const latitudeDelta = event.dy * 0.28 * sizeFactor;
+
+      globeView.manualLongitude = normalizeLongitude(globeView.manualLongitude + longitudeDelta);
+      globeView.manualLatitude = clamp(globeView.manualLatitude - latitudeDelta, -45, 45);
+      globeView.velocityLongitude = longitudeDelta * 0.2;
+      globeView.velocityLatitude = -latitudeDelta * 0.2;
+    })
+    .on('end', () => {
+      globeView.isDragging = false;
+      canvas.classList.remove('is-dragging');
+      startGlobeFrameLoop();
+    });
+
+  select<HTMLCanvasElement, unknown>(canvas).call(globeDrag);
+}
+
+function resizeGlobeCanvas(): void {
+  if (!scoreCircle || !globeCanvas || !globeContext || !globeProjection) return;
+
+  const rect = scoreCircle.getBoundingClientRect();
+  const cssSize = Math.max(1, Math.round(Math.min(rect.width, rect.height)));
+  const dpr = Math.min(Math.max(window.devicePixelRatio || 1, minGlobeDevicePixelRatio), maxGlobeDevicePixelRatio);
+  const width = isGlobeMotionActive()
+    ? Math.max(1, Math.min(maxMotionGlobeBackingSize, Math.round(cssSize * motionGlobeBackingScale)))
+    : Math.max(1, Math.min(maxGlobeBackingSize, Math.round(cssSize * dpr)));
+
+  if (globeCanvas.width !== width || globeCanvas.height !== width) {
+    globeCanvas.width = width;
+    globeCanvas.height = width;
+    globeCanvas.style.width = `${cssSize}px`;
+    globeCanvas.style.height = `${cssSize}px`;
+    if (globeOverlayCanvas) {
+      globeOverlayCanvas.width = width;
+      globeOverlayCanvas.height = width;
+      globeOverlayCanvas.style.width = `${cssSize}px`;
+      globeOverlayCanvas.style.height = `${cssSize}px`;
+    }
+    globeFrameImage = null;
+    globeProjectionMap = null;
+  }
+
+  globeSize = width;
+  globeCssSize = cssSize;
+  globeWebGLState?.gl.viewport(0, 0, width, width);
+  globeContext.setTransform(1, 0, 0, 1, 0, 0);
+  globeProjection.translate([width / 2, width / 2]).scale(width * (0.5 - globeSpherePadding)).clipAngle(90);
 }
 
 function refreshScoreLayout(): void {
-  rebuildScoreScrollCues();
-  setScoreOffset(isPlaying ? getCurrentCycleOffset() : pausedCycleOffset, true);
+  resizeGlobeCanvas();
+  renderCurrentGlobeFrame();
 }
 
-function getRenderedNoteCenterX(noteId: string): number | null {
-  if (!scoreTrack) return null;
-
-  const note = getRenderedScoreNote(noteId);
-  const svg = scoreTrack.querySelector<SVGSVGElement>('svg');
-  if (!(note instanceof SVGGraphicsElement) || !svg) return null;
-
-  const box = note.getBBox();
-  const viewBoxWidth = svg.viewBox.baseVal.width || Number(svg.getAttribute('width')) || scoreTrack.offsetWidth;
-  const renderedWidth = svg.getBoundingClientRect().width || scoreTrack.offsetWidth;
-  if (!viewBoxWidth) return null;
-
-  return ((box.x + box.width / 2) / viewBoxWidth) * renderedWidth;
+function renderCurrentGlobeFrame(): void {
+  renderScoreGlobe(isPlaying ? getCurrentCycleOffset() : pausedCycleOffset);
 }
 
-function getScoreXForNote(noteId: string): number | null {
-  if (!scoreTrack) return null;
+function renderScoreGlobe(offset: number): void {
+  if (!globeContext || !globeProjection || !globeSize) return;
 
-  const noteCenterX = getRenderedNoteCenterX(noteId);
-  if (noteCenterX === null) return null;
+  const context = globeContext;
+  const projection = globeProjection;
+  const rotation = getGlobeRotation(offset);
+  const path = geoPath(projection, context);
 
-  return scoreTrack.offsetWidth / 2 - noteCenterX;
+  projection.rotate([rotation.longitude, rotation.latitude, 0]).clipAngle(90);
+  context.clearRect(0, 0, globeSize, globeSize);
+
+  if (renderGlobeWebGL(rotation)) {
+    drawActiveGlobeNotes(context, rotation);
+    return;
+  }
+
+  drawGlobeBackground(context, path);
+  if (scoreTexture) {
+    drawScoreTextureGlobe(context, rotation, scoreTexture);
+    drawStaffLineGlobe(context, rotation, scoreTexture);
+  }
+  drawActiveGlobeNotes(context, rotation);
 }
 
-function rebuildScoreScrollCues(): void {
-  const grouped = new Map<string, { offset: number; totalX: number; totalWeight: number }>();
+function renderGlobeWebGL(rotation: GlobeRotation): boolean {
+  if (!globeWebGLState?.textureReady || !scoreTexture || !globeCanvas) return false;
+  const { gl, program, positionBuffer, texture, uniforms } = globeWebGLState;
+  if (!texture) return false;
 
-  scoreCues.forEach((cue) => {
-    const x = getScoreXForNote(cue.noteId);
-    if (x === null) return;
+  gl.viewport(0, 0, globeSize, globeSize);
+  gl.useProgram(program);
+  gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.uniform2f(uniforms.resolution, globeSize, globeSize);
+  gl.uniform2f(uniforms.rotation, rotation.longitude, rotation.latitude);
+  gl.uniform1f(uniforms.radius, globeSize * (0.5 - globeSpherePadding));
+  gl.uniform1f(uniforms.latTop, scoreTexture.latitudeTop);
+  gl.uniform1f(uniforms.latBottom, scoreTexture.latitudeBottom);
+  gl.uniform1i(uniforms.texture, 0);
+  gl.uniform1i(uniforms.staffCount, Math.min(maxStaffLineUniforms, scoreTexture.staffLineLatitudes.length));
+  gl.uniform1fv(uniforms.staffLatitudes, scoreTexture.staffLineLatitudes.slice(0, maxStaffLineUniforms));
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
 
-    const key = cue.offset.toFixed(6);
-    const group = grouped.get(key) ?? { offset: cue.offset, totalX: 0, totalWeight: 0 };
-    group.totalX += x * cue.weight;
-    group.totalWeight += cue.weight;
-    grouped.set(key, group);
+  return true;
+}
+
+function getGlobeRotation(offset: number): GlobeRotation {
+  const scoreLongitude = getGlobeCycleLongitude(offset);
+  return {
+    longitude: normalizeLongitude(-scoreLongitude + globeView.manualLongitude + globeView.idleLongitude),
+    latitude: clamp(globeView.manualLatitude + globeView.melodyLatitude, -45, 45)
+  };
+}
+
+function drawGlobeBackground(context: CanvasRenderingContext2D, path: ReturnType<typeof geoPath>): void {
+  const center = globeSize / 2;
+  const radius = globeSize * (0.5 - globeSpherePadding);
+  const gradient = context.createRadialGradient(center - radius * 0.34, center - radius * 0.42, radius * 0.08, center, center, radius * 1.05);
+
+  gradient.addColorStop(0, 'rgba(255, 255, 255, 0.52)');
+  gradient.addColorStop(0.44, 'rgba(252, 251, 248, 0.24)');
+  gradient.addColorStop(0.72, 'rgba(231, 227, 221, 0)');
+  gradient.addColorStop(1, 'rgba(231, 227, 221, 0)');
+
+  context.save();
+  context.beginPath();
+  path(globeSphere);
+  context.fillStyle = gradient;
+  context.fill();
+  context.restore();
+}
+
+function getGlobeTextureContext(): CanvasRenderingContext2D | null {
+  globeTextureCanvas ??= document.createElement('canvas');
+  globeTextureContext ??= globeTextureCanvas.getContext('2d', { alpha: true });
+  if (!globeTextureContext) return null;
+
+  if (globeTextureCanvas.width !== globeSize || globeTextureCanvas.height !== globeSize) {
+    globeTextureCanvas.width = globeSize;
+    globeTextureCanvas.height = globeSize;
+    globeFrameImage = null;
+  }
+
+  return globeTextureContext;
+}
+
+function drawScoreTextureGlobe(context: CanvasRenderingContext2D, rotation: GlobeRotation, texture: ScoreTexture): void {
+  const textureContext = getGlobeTextureContext();
+  if (!textureContext || !globeTextureCanvas) return;
+
+  const image =
+    globeFrameImage && globeFrameImage.width === globeSize && globeFrameImage.height === globeSize
+      ? globeFrameImage
+      : textureContext.createImageData(globeSize, globeSize);
+  const output = image.data;
+  const source = texture.data.data;
+  const map = getGlobeProjectionMap(rotation, texture);
+
+  globeFrameImage = image;
+  output.fill(0);
+
+  for (let index = 0; index < map.outputIndexes.length; index += 1) {
+    const outputIndex = map.outputIndexes[index];
+    const sourceY = map.sourceYs[index];
+    const visibility = map.textureVisibility[index];
+    if (visibility <= 0.004) continue;
+
+    let longitude = map.baseLongitudes[index] - rotation.longitude;
+    if (longitude < -180) {
+      longitude += 360;
+    } else if (longitude > 180) {
+      longitude -= 360;
+    }
+    const sourceX = clamp(((longitude + 180) / 360) * (texture.width - 1), 0, texture.width - 1);
+    const x0 = Math.floor(sourceX);
+    const y0 = Math.floor(sourceY);
+    const x1 = Math.min(texture.width - 1, x0 + 1);
+    const y1 = Math.min(texture.height - 1, y0 + 1);
+    const tx = sourceX - x0;
+    const ty = sourceY - y0;
+    const w00 = (1 - tx) * (1 - ty);
+    const w10 = tx * (1 - ty);
+    const w01 = (1 - tx) * ty;
+    const w11 = tx * ty;
+    const i00 = (y0 * texture.width + x0) * 4;
+    const i10 = (y0 * texture.width + x1) * 4;
+    const i01 = (y1 * texture.width + x0) * 4;
+    const i11 = (y1 * texture.width + x1) * 4;
+    const a00 = source[i00 + 3] * w00;
+    const a10 = source[i10 + 3] * w10;
+    const a01 = source[i01 + 3] * w01;
+    const a11 = source[i11 + 3] * w11;
+    const sampledAlpha = a00 + a10 + a01 + a11;
+    const alpha = sampledAlpha * visibility;
+    if (alpha <= 1) continue;
+
+    output[outputIndex] = (source[i00] * a00 + source[i10] * a10 + source[i01] * a01 + source[i11] * a11) / sampledAlpha;
+    output[outputIndex + 1] = (source[i00 + 1] * a00 + source[i10 + 1] * a10 + source[i01 + 1] * a01 + source[i11 + 1] * a11) / sampledAlpha;
+    output[outputIndex + 2] = (source[i00 + 2] * a00 + source[i10 + 2] * a10 + source[i01 + 2] * a01 + source[i11 + 2] * a11) / sampledAlpha;
+    output[outputIndex + 3] = Math.round(alpha);
+  }
+
+  textureContext.putImageData(image, 0, 0);
+  context.drawImage(globeTextureCanvas, 0, 0);
+}
+
+function getGlobeProjectionMap(rotation: GlobeRotation, texture: ScoreTexture): GlobeProjectionMap {
+  const pitchKey = Math.round(rotation.latitude * 100) / 100;
+  if (
+    globeProjectionMap &&
+    globeProjectionMap.size === globeSize &&
+    globeProjectionMap.pitch === pitchKey &&
+    globeProjectionMap.textureHeight === texture.height
+  ) {
+    return globeProjectionMap;
+  }
+
+  const radius = globeSize * (0.5 - globeSpherePadding);
+  const center = globeSize / 2;
+  const latitudeSpan = texture.latitudeTop - texture.latitudeBottom;
+  const pitch = -toRadians(pitchKey);
+  const cosPitch = Math.cos(pitch);
+  const sinPitch = Math.sin(pitch);
+  const start = Math.max(0, Math.floor(center - radius - 1));
+  const end = Math.min(globeSize - 1, Math.ceil(center + radius + 1));
+  const outputIndexes: number[] = [];
+  const baseLongitudes: number[] = [];
+  const sourceYs: number[] = [];
+  const textureVisibility: number[] = [];
+
+  for (let y = start; y <= end; y += 1) {
+    const normalizedY = (center - (y + 0.5)) / radius;
+    for (let x = start; x <= end; x += 1) {
+      const normalizedX = (x + 0.5 - center) / radius;
+      const radiusSquared = normalizedX * normalizedX + normalizedY * normalizedY;
+      if (radiusSquared > 1) continue;
+
+      const depth = Math.sqrt(1 - radiusSquared);
+      const unrotatedY = normalizedY * cosPitch + depth * sinPitch;
+      const unrotatedZ = -normalizedY * sinPitch + depth * cosPitch;
+      const latitude = (Math.asin(clamp(unrotatedY, -1, 1)) * 180) / Math.PI;
+      if (latitude > texture.latitudeTop || latitude < texture.latitudeBottom) continue;
+
+      const sourceY = clamp(((texture.latitudeTop - latitude) / latitudeSpan) * (texture.height - 1), 0, texture.height - 1);
+      if (!texture.visibleRows[Math.round(sourceY)]) continue;
+
+      const limbFade = smootherStep((depth - 0.22) / 0.24);
+
+      outputIndexes.push((y * globeSize + x) * 4);
+      baseLongitudes.push((Math.atan2(normalizedX, unrotatedZ) * 180) / Math.PI);
+      sourceYs.push(sourceY);
+      textureVisibility.push(limbFade * clamp(depth * 1.22 + 0.08, 0, 1));
+    }
+  }
+
+  globeProjectionMap = {
+    size: globeSize,
+    pitch: pitchKey,
+    textureHeight: texture.height,
+    outputIndexes: Uint32Array.from(outputIndexes),
+    baseLongitudes: Float32Array.from(baseLongitudes),
+    sourceYs: Float32Array.from(sourceYs),
+    textureVisibility: Float32Array.from(textureVisibility)
+  };
+
+  return globeProjectionMap;
+}
+
+function drawStaffLineGlobe(context: CanvasRenderingContext2D, rotation: GlobeRotation, texture: ScoreTexture): void {
+  if (texture.staffLineLatitudes.length === 0) return;
+
+  const step = Math.max(0.55, 520 / globeSize);
+  const lineWidth = Math.max(0.78, globeSize * 0.0009);
+
+  context.save();
+  context.globalCompositeOperation = 'multiply';
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.lineWidth = lineWidth;
+
+  texture.staffLineLatitudes.forEach((latitude) => {
+    let previous: ProjectedPoint | null = null;
+
+    for (let longitude = -178; longitude <= 178; longitude += step) {
+      const point = projectGlobePoint(longitude, latitude, rotation);
+      if (point.depth <= 0.12) {
+        previous = null;
+        continue;
+      }
+
+      if (previous) {
+        const fade = smootherStep((Math.min(point.depth, previous.depth) - 0.16) / 0.36);
+        if (fade > 0.02) {
+          context.strokeStyle = `rgba(18, 19, 19, ${0.32 * fade})`;
+          context.beginPath();
+          context.moveTo(previous.x, previous.y);
+          context.lineTo(point.x, point.y);
+          context.stroke();
+        }
+      }
+
+      previous = point;
+    }
   });
 
-  scoreScrollCues = Array.from(grouped.values())
-    .map((group) => ({ offset: group.offset, x: group.totalX / group.totalWeight }))
-    .sort((a, b) => a.offset - b.offset);
-
-  const finalSection = scoreSections[scoreSections.length - 1];
-  const firstNoteX = getScoreXForNote(getTrebleNoteId(0, 0));
-  const lastNoteX = finalSection ? getScoreXForNote(getTrebleNoteId(scoreSections.length - 1, finalSection.audioTreble.length - 1)) : null;
-
-  scoreScrollRange = firstNoteX === null || lastNoteX === null ? null : { startX: firstNoteX, endX: lastNoteX };
-  scoreScrollAnchors = scoreSections
-    .map((_, sectionIndex) => {
-      const offset = sectionIndex * sixteenthDuration * 16;
-      const cue = scoreScrollCues.find((scrollCue) => Math.abs(scrollCue.offset - offset) < 0.001);
-      const x = cue?.x ?? getScoreXForNote(getTrebleNoteId(sectionIndex, 0));
-
-      return x === null ? null : { offset, x };
-    })
-    .filter((anchor): anchor is ScoreScrollCue => anchor !== null);
-
-  if (lastNoteX !== null) {
-    scoreScrollAnchors.push({ offset: getMoonlightMusicDuration(), x: lastNoteX });
-  }
+  context.restore();
 }
 
-function getAdjustedAnchorX(anchor: ScoreScrollCue, musicDuration: number, scrollLead: number): number {
-  return anchor.x - scrollLead * Math.max(0, Math.min(1, anchor.offset / musicDuration));
-}
+function drawActiveGlobeNotes(context: CanvasRenderingContext2D, rotation: GlobeRotation): void {
+  visibleGlobeNotes.length = 0;
 
-function getAnchorSlope(index: number, musicDuration: number, scrollLead: number): number {
-  const previousIndex = Math.max(0, index - 1);
-  const nextIndex = Math.min(scoreScrollAnchors.length - 1, index + 1);
-  const previousAnchor = scoreScrollAnchors[previousIndex];
-  const nextAnchor = scoreScrollAnchors[nextIndex];
-  const offsetSpan = nextAnchor.offset - previousAnchor.offset;
+  activeGlobeNoteIds.forEach((noteId) => {
+    const note = globeNotesById.get(noteId);
+    if (!note) return;
 
-  if (offsetSpan <= 0) return 0;
-
-  return (getAdjustedAnchorX(nextAnchor, musicDuration, scrollLead) - getAdjustedAnchorX(previousAnchor, musicDuration, scrollLead)) / offsetSpan;
-}
-
-function getScoreMusicXAtOffset(offset: number, musicDuration: number, scrollLead: number): number | null {
-  if (scoreScrollAnchors.length <= 1) return null;
-
-  const firstAnchor = scoreScrollAnchors[0];
-  const lastAnchor = scoreScrollAnchors[scoreScrollAnchors.length - 1];
-
-  if (offset <= firstAnchor.offset) return getAdjustedAnchorX(firstAnchor, musicDuration, scrollLead);
-
-  for (let index = 0; index < scoreScrollAnchors.length - 1; index += 1) {
-    const currentAnchor = scoreScrollAnchors[index];
-    const nextAnchor = scoreScrollAnchors[index + 1];
-    if (offset <= nextAnchor.offset) {
-      const span = nextAnchor.offset - currentAnchor.offset;
-      const progress = span <= 0 ? 0 : Math.max(0, Math.min(1, (offset - currentAnchor.offset) / span));
-      const startX = getAdjustedAnchorX(currentAnchor, musicDuration, scrollLead);
-      const endX = getAdjustedAnchorX(nextAnchor, musicDuration, scrollLead);
-      const startSlope = getAnchorSlope(index, musicDuration, scrollLead);
-      const endSlope = getAnchorSlope(index + 1, musicDuration, scrollLead);
-      const progress2 = progress * progress;
-      const progress3 = progress2 * progress;
-
-      return (
-        (2 * progress3 - 3 * progress2 + 1) * startX +
-        (progress3 - 2 * progress2 + progress) * span * startSlope +
-        (-2 * progress3 + 3 * progress2) * endX +
-        (progress3 - progress2) * span * endSlope
-      );
+    const depth = getGlobeNoteDepth(note, rotation);
+    if (depth > -0.08) {
+      visibleGlobeNotes.push({ note, depth });
     }
-  }
+  });
 
-  return getAdjustedAnchorX(lastAnchor, musicDuration, scrollLead);
+  visibleGlobeNotes.sort((a, b) => a.depth - b.depth);
+  visibleGlobeNotes.forEach(({ note, depth }) => {
+    const noteOpacity = getDepthOpacity(depth, true);
+    const radius = globeSize * (note.track === 'bass' ? 0.0094 : 0.0082) * (0.84 + Math.max(0, depth) * 0.24);
+
+    note.pitches.forEach((pitch) => {
+      const point = projectGlobePoint(note.longitude, pitch.latitude, rotation);
+      const opacity = noteOpacity * getDepthOpacity(point.depth, true) * 0.46;
+      if (opacity <= 0.02) return;
+
+      const glow = context.createRadialGradient(point.x, point.y, 0, point.x, point.y, radius * 2.35);
+
+      glow.addColorStop(0, `rgba(116, 70, 28, ${opacity * 0.22})`);
+      glow.addColorStop(0.52, `rgba(116, 70, 28, ${opacity * 0.085})`);
+      glow.addColorStop(1, 'rgba(116, 70, 28, 0)');
+      context.fillStyle = glow;
+      context.beginPath();
+      context.arc(point.x, point.y, radius * 2.35, 0, Math.PI * 2);
+      context.fill();
+
+      context.save();
+      context.translate(point.x, point.y);
+      context.rotate(-0.18);
+      context.lineWidth = Math.max(0.55, globeSize * 0.00082);
+      context.fillStyle = `rgba(116, 70, 28, ${opacity * 0.14})`;
+      context.beginPath();
+      context.ellipse(0, 0, radius * 1.08, radius * 0.7, 0, 0, Math.PI * 2);
+      context.fill();
+
+      context.lineWidth = Math.max(0.9, globeSize * 0.0011);
+      context.strokeStyle = `rgba(142, 82, 28, ${opacity * 0.72})`;
+      context.beginPath();
+      context.ellipse(0, 0, radius * 1.72, radius * 1.12, 0, 0, Math.PI * 2);
+      context.stroke();
+
+      context.lineWidth = Math.max(0.55, globeSize * 0.00082);
+      context.strokeStyle = `rgba(54, 32, 14, ${opacity * 0.64})`;
+      context.beginPath();
+      context.ellipse(0, 0, radius * 1.34, radius * 0.88, 0, 0, Math.PI * 2);
+      context.stroke();
+      context.restore();
+    });
+  });
 }
 
-function getScoreXAtOffset(offset: number): number {
-  const cycleDuration = getMoonlightCycleDuration();
-  const normalizedOffset = ((offset % cycleDuration) + cycleDuration) % cycleDuration;
-  const musicDuration = getMoonlightMusicDuration();
-  const scrollLead = getScoreScrollLead();
-  const anchoredMusicX = getScoreMusicXAtOffset(normalizedOffset, musicDuration, scrollLead);
-
-  if (anchoredMusicX !== null) {
-    if (normalizedOffset <= musicDuration || scoreLoopPause <= 0) return anchoredMusicX;
-
-    const startX = getScoreMusicXAtOffset(0, musicDuration, scrollLead) ?? anchoredMusicX;
-    const endX = getScoreMusicXAtOffset(musicDuration, musicDuration, scrollLead) ?? anchoredMusicX;
-    const easedReset = smootherStep((normalizedOffset - musicDuration) / scoreLoopPause);
-    return endX + (startX - endX) * easedReset;
-  }
-
-  if (scoreScrollRange) {
-    const endX = scoreScrollRange.endX - scrollLead;
-
-    if (normalizedOffset <= musicDuration || scoreLoopPause <= 0) {
-      const progress = Math.max(0, Math.min(1, normalizedOffset / musicDuration));
-      return scoreScrollRange.startX + (endX - scoreScrollRange.startX) * progress;
-    }
-
-    const easedReset = smootherStep((normalizedOffset - musicDuration) / scoreLoopPause);
-    return endX + (scoreScrollRange.startX - endX) * easedReset;
-  }
-
-  if (scoreScrollCues.length === 0) return getFallbackScoreX(normalizedOffset / cycleDuration);
-
-  const firstCue = scoreScrollCues[0];
-  if (normalizedOffset <= firstCue.offset) return firstCue.x;
-
-  for (let index = 0; index < scoreScrollCues.length - 1; index += 1) {
-    const currentCue = scoreScrollCues[index];
-    const nextCue = scoreScrollCues[index + 1];
-    if (normalizedOffset < nextCue.offset) {
-      const span = nextCue.offset - currentCue.offset;
-      const progress = Math.max(0, Math.min(1, (normalizedOffset - currentCue.offset) / span));
-      return currentCue.x + (nextCue.x - currentCue.x) * progress;
-    }
-  }
-
-  const lastCue = scoreScrollCues[scoreScrollCues.length - 1];
-  const loopSpan = cycleDuration - lastCue.offset;
-  if (loopSpan <= 0) return lastCue.x;
-
-  const progress = Math.max(0, Math.min(1, (normalizedOffset - lastCue.offset) / loopSpan));
-  return lastCue.x + (firstCue.x - lastCue.x) * progress;
+function getGlobeNoteDepth(note: GlobeNote, rotation: GlobeRotation): number {
+  const totalDepth = note.pitches.reduce((sum, pitch) => sum + projectGlobePoint(note.longitude, pitch.latitude, rotation).depth, 0);
+  return totalDepth / note.pitches.length;
 }
 
-function getScoreOffsetForX(x: number, preferredOffset = pausedCycleOffset): number {
-  const cycleDuration = getMoonlightCycleDuration();
-  const musicDuration = getMoonlightMusicDuration();
-  const normalizedPreferred = ((preferredOffset % cycleDuration) + cycleDuration) % cycleDuration;
-
-  if (scoreScrollAnchors.length > 1) {
-    const scrollLead = getScoreScrollLead();
-    const startX = getScoreMusicXAtOffset(0, musicDuration, scrollLead) ?? x;
-    const endX = getScoreMusicXAtOffset(musicDuration, musicDuration, scrollLead) ?? x;
-
-    if (normalizedPreferred > musicDuration && scoreLoopPause > 0) {
-      const resetProgress = Math.max(0, Math.min(1, (x - endX) / (startX - endX)));
-      return musicDuration + resetProgress * scoreLoopPause;
-    }
-
-    let lowOffset = 0;
-    let highOffset = musicDuration;
-    for (let index = 0; index < 24; index += 1) {
-      const midpoint = (lowOffset + highOffset) / 2;
-      const midpointX = getScoreMusicXAtOffset(midpoint, musicDuration, scrollLead) ?? x;
-      if (midpointX > x) {
-        lowOffset = midpoint;
-      } else {
-        highOffset = midpoint;
-      }
-    }
-
-    return (lowOffset + highOffset) / 2;
+function getDepthOpacity(depth: number, active: boolean): number {
+  if (depth < 0) {
+    return clamp((depth + 0.14) / 0.14, 0, 1) * (active ? 0.16 : 0.07);
   }
 
-  if (!scoreScrollRange) return normalizedPreferred;
+  return clamp(0.16 + depth * 0.88 + (active ? 0.16 : 0), 0, 1);
+}
 
-  const { startX } = scoreScrollRange;
-  const endX = scoreScrollRange.endX - getScoreScrollLead();
-  if (Math.abs(endX - startX) < 0.001) return normalizedPreferred;
+function projectGlobePoint(longitude: number, latitude: number, rotation: GlobeRotation): ProjectedPoint {
+  const lambda = toRadians(longitude + rotation.longitude);
+  const phi = toRadians(latitude);
+  const pitch = -toRadians(rotation.latitude);
+  const cosPhi = Math.cos(phi);
+  const x = cosPhi * Math.sin(lambda);
+  const y = Math.sin(phi);
+  const z = cosPhi * Math.cos(lambda);
+  const rotatedY = y * Math.cos(pitch) - z * Math.sin(pitch);
+  const rotatedZ = y * Math.sin(pitch) + z * Math.cos(pitch);
+  const scale = globeSize * (0.5 - globeSpherePadding);
 
-  if (normalizedPreferred > musicDuration && scoreLoopPause > 0) {
-    const resetProgress = Math.max(0, Math.min(1, (x - endX) / (startX - endX)));
-    return musicDuration + resetProgress * scoreLoopPause;
+  return {
+    x: globeSize / 2 + x * scale,
+    y: globeSize / 2 - rotatedY * scale,
+    depth: rotatedZ,
+    edgeFade: clamp((rotatedZ + 0.04) / 0.44, 0, 1)
+  };
+}
+
+function startGlobeFrameLoop(): void {
+  if (globeFrameTimer) return;
+
+  resizeGlobeCanvas();
+  globeView.lastFrameTime = performance.now();
+  lastGlobeRenderTime = 0;
+  globeFrameTimer = timer(() => {
+    renderGlobeAnimationFrame(performance.now());
+  });
+}
+
+function stopGlobeFrameLoop(): void {
+  globeFrameTimer?.stop();
+  globeFrameTimer = null;
+}
+
+function renderGlobeAnimationFrame(frameTime: number): void {
+  const isActiveMotion =
+    globeView.isDragging || isPlaying || Math.abs(globeView.velocityLongitude) > 0.002 || Math.abs(globeView.velocityLatitude) > 0.002;
+  if (!isActiveMotion && frameTime - lastGlobeRenderTime < 84) return;
+
+  const deltaSeconds = clamp((frameTime - globeView.lastFrameTime) / 1000, 0, 0.08);
+  globeView.lastFrameTime = frameTime;
+  lastGlobeRenderTime = frameTime;
+
+  if (!globeView.isDragging && (Math.abs(globeView.velocityLongitude) > 0.002 || Math.abs(globeView.velocityLatitude) > 0.002)) {
+    globeView.manualLongitude = normalizeLongitude(globeView.manualLongitude + globeView.velocityLongitude * deltaSeconds * 60);
+    globeView.manualLatitude = clamp(globeView.manualLatitude + globeView.velocityLatitude * deltaSeconds * 60, -45, 45);
+    const decay = Math.exp(-deltaSeconds * 5.8);
+    globeView.velocityLongitude *= decay;
+    globeView.velocityLatitude *= decay;
   }
 
-  const musicProgress = Math.max(0, Math.min(1, (x - startX) / (endX - startX)));
-  return musicProgress * musicDuration;
+  const cycleOffset = isPlaying ? getCurrentCycleOffset() : pausedCycleOffset;
+  updateMelodyLatitude(cycleOffset, deltaSeconds);
+  renderScoreGlobe(cycleOffset);
+
+  if (!shouldContinueGlobeFrameLoop()) {
+    stopGlobeFrameLoop();
+    refreshScoreLayout();
+  }
 }
 
-function setScoreOffset(offset: number, immediate = false, frameTime = performance.now()): void {
-  const cycleDuration = getMoonlightCycleDuration();
-  const normalizedOffset = ((offset % cycleDuration) + cycleDuration) % cycleDuration;
-
-  setScoreX(getScoreXAtOffset(normalizedOffset), immediate, frameTime);
+function isGlobeMotionActive(): boolean {
+  return (
+    isPlaying ||
+    globeView.isDragging ||
+    Math.abs(globeView.melodyLatitude) > 0.002 ||
+    Math.abs(globeView.velocityLongitude) > 0.002 ||
+    Math.abs(globeView.velocityLatitude) > 0.002
+  );
 }
 
-function setScoreProgress(progress: number, immediate = false, frameTime = performance.now()): void {
-  setScoreOffset(progress * getMoonlightCycleDuration(), immediate, frameTime);
+function shouldContinueGlobeFrameLoop(): boolean {
+  return isGlobeMotionActive();
 }
 
 function cancelScoreScroll(): void {
-  window.cancelAnimationFrame(scoreAnimationFrame);
-  scoreAnimationFrame = 0;
+  stopGlobeFrameLoop();
 }
 
 function clearNoteHighlights(): void {
   activeHighlightTimers.forEach((timer) => window.clearTimeout(timer));
   activeHighlightTimers = [];
-  document.querySelectorAll('.score-note.is-playing').forEach((note) => note.classList.remove('is-playing'));
+  activeGlobeNoteIds.clear();
+  renderCurrentGlobeFrame();
 }
 
 function illuminateScoreNote(noteId: string, duration: number): void {
-  const note = getRenderedScoreNote(noteId);
-  if (!note) return;
+  const cue = scoreCues.find((scoreCue) => scoreCue.noteId === noteId);
+  if (!cue) return;
 
-  note.classList.remove('is-playing');
-  note.getBoundingClientRect();
-  note.classList.add('is-playing');
+  activeGlobeNoteIds.delete(noteId);
+  activeGlobeNoteIds.add(noteId);
+  renderCurrentGlobeFrame();
 
   const timer = window.setTimeout(() => {
-    note.classList.remove('is-playing');
+    activeGlobeNoteIds.delete(noteId);
     activeHighlightTimers = activeHighlightTimers.filter((activeTimer) => activeTimer !== timer);
-  }, Math.max(80, Math.min(180, duration * 1000)));
+    renderCurrentGlobeFrame();
+  }, Math.max(120, Math.min(320, (duration || cue.duration) * 1200)));
 
   activeHighlightTimers.push(timer);
 }
@@ -649,19 +1599,10 @@ function startScoreScroll(context: AudioContext, cycleStart: number, cycleDurati
   scoreVisualStartTime = frameTime + Math.max(0, cycleStart - context.currentTime) * 1000;
   scoreVisualStartOffset = normalizedOffset;
   cancelScoreScroll();
-  if (!lastScoreFrameTime) lastScoreFrameTime = frameTime;
-  setScoreOffset(normalizedOffset, false, frameTime);
-
-  const tick = (now: number): void => {
-    if (!isPlaying) return;
-
-    const elapsed = now < scoreVisualStartTime ? scoreVisualStartOffset : scoreVisualStartOffset + (now - scoreVisualStartTime) / 1000;
-    const progress = (elapsed % scoreCycleDuration) / scoreCycleDuration;
-    setScoreProgress(progress, false, now);
-    scoreAnimationFrame = window.requestAnimationFrame(tick);
-  };
-
-  scoreAnimationFrame = window.requestAnimationFrame(tick);
+  resizeGlobeCanvas();
+  globeView.melodyLatitude = getMelodyLatitudeTarget(normalizedOffset);
+  renderScoreGlobe(normalizedOffset);
+  startGlobeFrameLoop();
 }
 
 function getCurrentCycleOffset(): number {
@@ -862,9 +1803,10 @@ function trackSource(source: AudioScheduledSourceNode): void {
 
 function stopPlayback(): void {
   if (isPlaying) {
-    pausedCycleOffset = getScoreOffsetForX(currentScoreX, getCurrentCycleOffset());
+    pausedCycleOffset = getCurrentCycleOffset();
   }
 
+  isPlaying = false;
   activeSources.forEach((source) => {
     try {
       source.stop();
@@ -875,11 +1817,10 @@ function stopPlayback(): void {
   activeSources = [];
   window.clearTimeout(stopTimer);
   cancelScoreScroll();
+  globeView.melodyLatitude = 0;
   clearNoteHighlights();
-  freezeScoreTransform();
   scoreVisualStartTime = 0;
   scoreVisualStartOffset = pausedCycleOffset;
-  isPlaying = false;
   if (playButton) playButton.textContent = 'Play';
   refreshScoreLayout();
 }
@@ -1092,12 +2033,26 @@ function showPortfolio(): void {
 }
 
 createPortfolioList();
-scoreRenderPromise = renderLongScore()
+scoreRenderPromise = renderGlobeScore()
   .then(() => {
     window.requestAnimationFrame(refreshScoreLayout);
   })
-  .catch(() => undefined);
+  .catch((error: unknown) => {
+    console.error(error);
+  });
 preloadPianoSamples();
+reducedMotionQuery.addEventListener('change', (event) => {
+  prefersReducedMotion = event.matches;
+
+  if (prefersReducedMotion) {
+    globeView.melodyLatitude = 0;
+  }
+
+  if (prefersReducedMotion && !isPlaying && !globeView.isDragging) {
+    stopGlobeFrameLoop();
+    renderCurrentGlobeFrame();
+  }
+});
 window.addEventListener('resize', () => {
   window.requestAnimationFrame(refreshScoreLayout);
 });
