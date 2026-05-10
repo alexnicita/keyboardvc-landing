@@ -115,6 +115,7 @@ const pianoSamples: PianoSample[] = pianoSampleNotes.map((note) => ({
 }));
 let scoreCues: ScoreCue[] = [];
 let scoreScrollCues: ScoreScrollCue[] = [];
+let scoreScrollAnchors: ScoreScrollCue[] = [];
 let scoreScrollRange: ScoreScrollRange | null = null;
 let scoreFontLoadPromise: Promise<void> | null = null;
 let scoreRenderPromise: Promise<void> | null = null;
@@ -126,6 +127,7 @@ const portfolioView = document.querySelector<HTMLElement>('.portfolio-view');
 const portfolioList = document.querySelector<HTMLUListElement>('#portfolio-list');
 const scoreCircle = document.querySelector<HTMLElement>('.score-circle');
 const scoreTrack = document.querySelector<HTMLElement>('#long-score');
+const intro = document.querySelector<HTMLElement>('.intro');
 const musicPresents = document.querySelector<HTMLElement>('#music-presents');
 
 let audioContext: AudioContext | null = null;
@@ -369,6 +371,57 @@ function getFallbackScoreX(progress: number): number {
   return startX + (endX - startX) * clampedProgress;
 }
 
+function getScoreScrollLead(): number {
+  if (!scoreCircle) return 0;
+
+  const circleWidth = scoreCircle.clientWidth;
+  const minCircle = 300;
+  const maxCircle = 760;
+  const smallScreenAmount = 1 - Math.max(0, Math.min(1, (circleWidth - minCircle) / (maxCircle - minCircle)));
+
+  return circleWidth * smallScreenAmount * 0.02;
+}
+
+function getIntroClearanceBox(): DOMRect {
+  if (!intro || !musicPresents?.hidden) return intro?.getBoundingClientRect() ?? new DOMRect();
+
+  const previousVisibility = musicPresents.style.visibility;
+  musicPresents.hidden = false;
+  musicPresents.style.visibility = 'hidden';
+  const reservedBox = intro.getBoundingClientRect();
+  musicPresents.hidden = true;
+  musicPresents.style.visibility = previousVisibility;
+
+  return reservedBox;
+}
+
+function updateScoreClearance(): void {
+  if (!intro) return;
+
+  const introBox = getIntroClearanceBox();
+  const gap = Math.max(8, window.innerHeight * 0.015);
+  const safeTop = introBox.bottom + gap;
+  const isMobile = window.matchMedia('(max-width: 720px)').matches;
+  const baseShiftY = isMobile ? window.innerHeight * 0.04 : 0;
+  const viewportDiameter = isMobile
+    ? Math.min(window.innerWidth * 0.9, window.innerHeight - 220)
+    : Math.min(Math.min(window.innerWidth, window.innerHeight) * 0.76, window.innerWidth - 40, 760);
+  const minimumDiameter = Math.min(isMobile ? 280 : 340, viewportDiameter);
+  const safeDiameter = window.innerHeight + baseShiftY * 2 - safeTop * 2;
+  const diameter = Math.max(minimumDiameter, Math.min(viewportDiameter, safeDiameter));
+  const topWithBaseShift = (window.innerHeight - diameter) / 2 + baseShiftY;
+  const extraShiftY = Math.max(0, safeTop - topWithBaseShift);
+
+  document.documentElement.style.setProperty('--score-safe-diameter', `${diameter.toFixed(2)}px`);
+  document.documentElement.style.setProperty('--score-extra-offset-y', `${extraShiftY.toFixed(2)}px`);
+}
+
+function refreshScoreLayout(): void {
+  updateScoreClearance();
+  rebuildScoreScrollCues();
+  setScoreOffset(isPlaying ? getCurrentCycleOffset() : pausedCycleOffset, true);
+}
+
 function getRenderedNoteCenterX(noteId: string): number | null {
   if (!scoreTrack) return null;
 
@@ -378,9 +431,10 @@ function getRenderedNoteCenterX(noteId: string): number | null {
 
   const box = note.getBBox();
   const viewBoxWidth = svg.viewBox.baseVal.width || Number(svg.getAttribute('width')) || scoreTrack.offsetWidth;
+  const renderedWidth = svg.getBoundingClientRect().width || scoreTrack.offsetWidth;
   if (!viewBoxWidth) return null;
 
-  return ((box.x + box.width / 2) / viewBoxWidth) * scoreTrack.offsetWidth;
+  return ((box.x + box.width / 2) / viewBoxWidth) * renderedWidth;
 }
 
 function getScoreXForNote(noteId: string): number | null {
@@ -415,21 +469,96 @@ function rebuildScoreScrollCues(): void {
   const lastNoteX = finalSection ? getScoreXForNote(getTrebleNoteId(scoreSections.length - 1, finalSection.audioTreble.length - 1)) : null;
 
   scoreScrollRange = firstNoteX === null || lastNoteX === null ? null : { startX: firstNoteX, endX: lastNoteX };
+  scoreScrollAnchors = scoreSections
+    .map((_, sectionIndex) => {
+      const offset = sectionIndex * sixteenthDuration * 16;
+      const cue = scoreScrollCues.find((scrollCue) => Math.abs(scrollCue.offset - offset) < 0.001);
+      const x = cue?.x ?? getScoreXForNote(getTrebleNoteId(sectionIndex, 0));
+
+      return x === null ? null : { offset, x };
+    })
+    .filter((anchor): anchor is ScoreScrollCue => anchor !== null);
+
+  if (lastNoteX !== null) {
+    scoreScrollAnchors.push({ offset: getMoonlightMusicDuration(), x: lastNoteX });
+  }
+}
+
+function getAdjustedAnchorX(anchor: ScoreScrollCue, musicDuration: number, scrollLead: number): number {
+  return anchor.x - scrollLead * Math.max(0, Math.min(1, anchor.offset / musicDuration));
+}
+
+function getAnchorSlope(index: number, musicDuration: number, scrollLead: number): number {
+  const previousIndex = Math.max(0, index - 1);
+  const nextIndex = Math.min(scoreScrollAnchors.length - 1, index + 1);
+  const previousAnchor = scoreScrollAnchors[previousIndex];
+  const nextAnchor = scoreScrollAnchors[nextIndex];
+  const offsetSpan = nextAnchor.offset - previousAnchor.offset;
+
+  if (offsetSpan <= 0) return 0;
+
+  return (getAdjustedAnchorX(nextAnchor, musicDuration, scrollLead) - getAdjustedAnchorX(previousAnchor, musicDuration, scrollLead)) / offsetSpan;
+}
+
+function getScoreMusicXAtOffset(offset: number, musicDuration: number, scrollLead: number): number | null {
+  if (scoreScrollAnchors.length <= 1) return null;
+
+  const firstAnchor = scoreScrollAnchors[0];
+  const lastAnchor = scoreScrollAnchors[scoreScrollAnchors.length - 1];
+
+  if (offset <= firstAnchor.offset) return getAdjustedAnchorX(firstAnchor, musicDuration, scrollLead);
+
+  for (let index = 0; index < scoreScrollAnchors.length - 1; index += 1) {
+    const currentAnchor = scoreScrollAnchors[index];
+    const nextAnchor = scoreScrollAnchors[index + 1];
+    if (offset <= nextAnchor.offset) {
+      const span = nextAnchor.offset - currentAnchor.offset;
+      const progress = span <= 0 ? 0 : Math.max(0, Math.min(1, (offset - currentAnchor.offset) / span));
+      const startX = getAdjustedAnchorX(currentAnchor, musicDuration, scrollLead);
+      const endX = getAdjustedAnchorX(nextAnchor, musicDuration, scrollLead);
+      const startSlope = getAnchorSlope(index, musicDuration, scrollLead);
+      const endSlope = getAnchorSlope(index + 1, musicDuration, scrollLead);
+      const progress2 = progress * progress;
+      const progress3 = progress2 * progress;
+
+      return (
+        (2 * progress3 - 3 * progress2 + 1) * startX +
+        (progress3 - 2 * progress2 + progress) * span * startSlope +
+        (-2 * progress3 + 3 * progress2) * endX +
+        (progress3 - progress2) * span * endSlope
+      );
+    }
+  }
+
+  return getAdjustedAnchorX(lastAnchor, musicDuration, scrollLead);
 }
 
 function getScoreXAtOffset(offset: number): number {
   const cycleDuration = getMoonlightCycleDuration();
   const normalizedOffset = ((offset % cycleDuration) + cycleDuration) % cycleDuration;
   const musicDuration = getMoonlightMusicDuration();
+  const scrollLead = getScoreScrollLead();
+  const anchoredMusicX = getScoreMusicXAtOffset(normalizedOffset, musicDuration, scrollLead);
+
+  if (anchoredMusicX !== null) {
+    if (normalizedOffset <= musicDuration || scoreLoopPause <= 0) return anchoredMusicX;
+
+    const startX = getScoreMusicXAtOffset(0, musicDuration, scrollLead) ?? anchoredMusicX;
+    const endX = getScoreMusicXAtOffset(musicDuration, musicDuration, scrollLead) ?? anchoredMusicX;
+    const easedReset = smootherStep((normalizedOffset - musicDuration) / scoreLoopPause);
+    return endX + (startX - endX) * easedReset;
+  }
 
   if (scoreScrollRange) {
+    const endX = scoreScrollRange.endX - scrollLead;
+
     if (normalizedOffset <= musicDuration || scoreLoopPause <= 0) {
       const progress = Math.max(0, Math.min(1, normalizedOffset / musicDuration));
-      return scoreScrollRange.startX + (scoreScrollRange.endX - scoreScrollRange.startX) * progress;
+      return scoreScrollRange.startX + (endX - scoreScrollRange.startX) * progress;
     }
 
     const easedReset = smootherStep((normalizedOffset - musicDuration) / scoreLoopPause);
-    return scoreScrollRange.endX + (scoreScrollRange.startX - scoreScrollRange.endX) * easedReset;
+    return endX + (scoreScrollRange.startX - endX) * easedReset;
   }
 
   if (scoreScrollCues.length === 0) return getFallbackScoreX(normalizedOffset / cycleDuration);
@@ -459,9 +588,36 @@ function getScoreOffsetForX(x: number, preferredOffset = pausedCycleOffset): num
   const cycleDuration = getMoonlightCycleDuration();
   const musicDuration = getMoonlightMusicDuration();
   const normalizedPreferred = ((preferredOffset % cycleDuration) + cycleDuration) % cycleDuration;
+
+  if (scoreScrollAnchors.length > 1) {
+    const scrollLead = getScoreScrollLead();
+    const startX = getScoreMusicXAtOffset(0, musicDuration, scrollLead) ?? x;
+    const endX = getScoreMusicXAtOffset(musicDuration, musicDuration, scrollLead) ?? x;
+
+    if (normalizedPreferred > musicDuration && scoreLoopPause > 0) {
+      const resetProgress = Math.max(0, Math.min(1, (x - endX) / (startX - endX)));
+      return musicDuration + resetProgress * scoreLoopPause;
+    }
+
+    let lowOffset = 0;
+    let highOffset = musicDuration;
+    for (let index = 0; index < 24; index += 1) {
+      const midpoint = (lowOffset + highOffset) / 2;
+      const midpointX = getScoreMusicXAtOffset(midpoint, musicDuration, scrollLead) ?? x;
+      if (midpointX > x) {
+        lowOffset = midpoint;
+      } else {
+        highOffset = midpoint;
+      }
+    }
+
+    return (lowOffset + highOffset) / 2;
+  }
+
   if (!scoreScrollRange) return normalizedPreferred;
 
-  const { startX, endX } = scoreScrollRange;
+  const { startX } = scoreScrollRange;
+  const endX = scoreScrollRange.endX - getScoreScrollLead();
   if (Math.abs(endX - startX) < 0.001) return normalizedPreferred;
 
   if (normalizedPreferred > musicDuration && scoreLoopPause > 0) {
@@ -763,6 +919,7 @@ function stopPlayback(): void {
   isPlaying = false;
   if (playButton) playButton.textContent = 'Play';
   if (musicPresents) musicPresents.hidden = true;
+  refreshScoreLayout();
 }
 
 function scheduleSampledPianoTone(context: AudioContext, note: string, start: number, duration: number, gainValue: number): boolean {
@@ -957,6 +1114,7 @@ async function playDisplayedMoonlight(): Promise<void> {
   if (!isPlaying) return;
 
   if (musicPresents) musicPresents.hidden = false;
+  refreshScoreLayout();
 
   const cycleStart = context.currentTime + 0.06;
   const cycleDuration = getMoonlightCycleDuration();
@@ -975,15 +1133,15 @@ function showPortfolio(): void {
 createPortfolioList();
 scoreRenderPromise = renderLongScore()
   .then(() => {
-    window.requestAnimationFrame(() => setScoreProgress(0, true));
+    window.requestAnimationFrame(refreshScoreLayout);
   })
   .catch(() => undefined);
 preloadPianoSamples();
 window.addEventListener('resize', () => {
-  window.requestAnimationFrame(() => {
-    rebuildScoreScrollCues();
-    setScoreOffset(isPlaying ? getCurrentCycleOffset() : pausedCycleOffset, true);
-  });
+  window.requestAnimationFrame(refreshScoreLayout);
 });
+window.visualViewport?.addEventListener('resize', () => window.requestAnimationFrame(refreshScoreLayout));
+const introResizeObserver = 'ResizeObserver' in window ? new ResizeObserver(() => window.requestAnimationFrame(refreshScoreLayout)) : null;
+if (intro) introResizeObserver?.observe(intro);
 playButton?.addEventListener('click', () => void playDisplayedMoonlight());
 portfolioButton?.addEventListener('click', showPortfolio);

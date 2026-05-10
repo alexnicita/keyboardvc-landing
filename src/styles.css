@@ -18,6 +18,9 @@
   --leading-xs: 1;
   --font-weight-regular: 400;
   --padding: 8px;
+  --score-safe-diameter: 760px;
+  --score-base-offset-y: 0px;
+  --score-extra-offset-y: 0px;
   background: var(--color-canvas-white);
 }
 
@@ -168,7 +171,7 @@ button {
 
 .score-circle {
   position: relative;
-  width: min(76vmin, calc(100vw - 40px), 760px);
+  width: min(76vmin, calc(100vw - 40px), 760px, var(--score-safe-diameter));
   aspect-ratio: 1;
   overflow: hidden;
   border: 1px solid rgba(0, 0, 0, 0.24);
@@ -178,6 +181,7 @@ button {
   isolation: isolate;
   -webkit-mask-image: radial-gradient(circle, #000 99.5%, transparent 100%);
   mask-image: radial-gradient(circle, #000 99.5%, transparent 100%);
+  transform: translateY(calc(var(--score-base-offset-y) + var(--score-extra-offset-y)));
 }
 
 .long-score {
@@ -321,6 +325,7 @@ button {
 @media (max-width: 720px) {
   :root {
     --padding: 10px;
+    --score-base-offset-y: 4vh;
   }
 
   .intro {
@@ -340,9 +345,7 @@ button {
   }
 
   .score-circle {
-    width: min(86vw, calc(100vh - 220px));
-    min-width: 300px;
-    transform: translateY(4vh);
+    width: min(90vw, calc(100vh - 220px), var(--score-safe-diameter));
   }
 
   .long-score {
