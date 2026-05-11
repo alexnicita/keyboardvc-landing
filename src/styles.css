@@ -77,8 +77,12 @@ button:focus-visible {
 }
 
 .intro {
+  --intro-scale: 1;
+  --intro-top: var(--padding);
+  --intro-y: 0%;
+
   position: fixed;
-  top: var(--padding);
+  top: var(--intro-top);
   left: 50%;
   z-index: 20;
   width: max-content;
@@ -89,7 +93,7 @@ button:focus-visible {
   mix-blend-mode: difference;
   opacity: 1;
   text-align: center;
-  transform: translateX(-50%);
+  transform: translate3d(-50%, var(--intro-y), 0) scale(var(--intro-scale));
   transition:
     top 980ms cubic-bezier(0.19, 1, 0.22, 1),
     opacity 760ms ease,
@@ -159,11 +163,13 @@ button:focus-visible {
 }
 
 .page-shell[data-loading="true"] .intro {
-  top: 50%;
+  --intro-scale: 1.04;
+  --intro-top: 50%;
+  --intro-y: -50%;
+
   color: var(--color-note-black);
   mix-blend-mode: normal;
   pointer-events: none;
-  transform: translate(-50%, -50%) scale(1.04);
 }
 
 .page-shell[data-loading="true"] .intro em {
@@ -180,6 +186,7 @@ button:focus-visible {
 }
 
 .page-shell[data-loading="true"] .music-view {
+  visibility: hidden;
   opacity: 0;
   pointer-events: none;
   transform: scale(0.9);
@@ -187,6 +194,7 @@ button:focus-visible {
 }
 
 .portfolio-view {
+  visibility: hidden;
   opacity: 0;
   pointer-events: none;
   transform: scale(0.96);
@@ -200,16 +208,25 @@ button:focus-visible {
 }
 
 .page-shell[data-view="portfolio"] .intro {
+  --intro-y: -10px;
+
   opacity: 0;
   pointer-events: none;
-  transform: translateX(-50%) translateY(-10px);
   filter: blur(8px);
 }
 
 .page-shell[data-view="portfolio"] .portfolio-view {
+  visibility: visible;
   opacity: 1;
   pointer-events: auto;
   transform: scale(1);
+}
+
+.page-shell[data-loading="true"] .portfolio-view {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.96);
 }
 
 .score-circle {
@@ -312,6 +329,7 @@ button:focus-visible {
 
 .page-shell[data-loading="true"] .play-button,
 .page-shell[data-loading="true"] .portfolio-button {
+  visibility: hidden;
   opacity: 0;
   pointer-events: none;
   filter: blur(8px);
@@ -319,6 +337,7 @@ button:focus-visible {
 }
 
 .page-shell[data-loading="true"] .copyright {
+  visibility: hidden;
   opacity: 0;
   filter: blur(6px);
   transform: translateX(-50%) translateY(12px);
