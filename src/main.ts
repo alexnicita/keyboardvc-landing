@@ -62,6 +62,8 @@ type GlobeViewState = {
   manualLatitude: number;
   melodyLatitude: number;
   idleLongitude: number;
+  idleLatitude: number;
+  idlePhase: number;
   velocityLongitude: number;
   velocityLatitude: number;
   lastFrameTime: number;
@@ -185,6 +187,11 @@ const maxMotionGlobeBackingSize = maxGlobeBackingSize;
 const maxStaffLineUniforms = 16;
 const melodyTiltDegrees = 4.2;
 const melodyTiltSmoothing = 9.5;
+const idleGlobeLongitudeDegreesPerSecond = -5.2;
+const idleGlobeLatitudeDegrees = 3.2;
+const idleGlobeLatitudeCyclesPerSecond = 0.06;
+const idleGlobeReturnSmoothing = 8;
+const playHandoffDurationMs = 640;
 const globeSphere: GeoPermissibleObjects = { type: 'Sphere' };
 const pianoSampleNotes = [
   'D#1',
@@ -273,6 +280,7 @@ let scoreVisualStartOffset = 0;
 let pausedCycleOffset = 0;
 let isPlaying = false;
 let isPlaybackStarting = false;
+let isPageRevealed = false;
 let initialTitleTypingPromise: Promise<void> | null = null;
 let initialTitleCompleteTime = 0;
 const globeView: GlobeViewState = {
@@ -280,6 +288,8 @@ const globeView: GlobeViewState = {
   manualLatitude: -8,
   melodyLatitude: 0,
   idleLongitude: 0,
+  idleLatitude: 0,
+  idlePhase: 0,
   velocityLongitude: 0,
   velocityLatitude: 0,
   lastFrameTime: 0,
@@ -1076,6 +1086,54 @@ function updateMelodyLatitude(offset: number, deltaSeconds: number): void {
   }
 }
 
+function updateIdleGlobeMotion(deltaSeconds: number): void {
+  if (isIdleGlobeMotionActive() && !globeView.isDragging) {
+    globeView.idleLongitude = normalizeLongitude(globeView.idleLongitude + idleGlobeLongitudeDegreesPerSecond * deltaSeconds);
+    globeView.idlePhase = (globeView.idlePhase + deltaSeconds * idleGlobeLatitudeCyclesPerSecond * Math.PI * 2) % (Math.PI * 2);
+    globeView.idleLatitude = Math.sin(globeView.idlePhase) * idleGlobeLatitudeDegrees;
+    return;
+  }
+
+  const blend = 1 - Math.exp(-deltaSeconds * idleGlobeReturnSmoothing);
+  const normalizedLongitude = normalizeLongitude(globeView.idleLongitude);
+  if (Math.abs(normalizedLongitude) > 0.001) {
+    globeView.idleLongitude = normalizeLongitude(normalizedLongitude * (1 - blend));
+  } else {
+    globeView.idleLongitude = 0;
+  }
+
+  if (Math.abs(globeView.idleLatitude) > 0.001) {
+    globeView.idleLatitude += (0 - globeView.idleLatitude) * blend;
+  } else {
+    globeView.idleLatitude = 0;
+  }
+}
+
+function resetIdleGlobeMotion(): void {
+  globeView.idleLongitude = 0;
+  globeView.idleLatitude = 0;
+  globeView.idlePhase = 0;
+}
+
+function getPlaybackHandoffDuration(): number {
+  if (prefersReducedMotion) return 0;
+
+  const longitudeProgress = Math.abs(normalizeLongitude(globeView.idleLongitude)) / 180;
+  const latitudeProgress = Math.abs(globeView.idleLatitude) / Math.max(1, idleGlobeLatitudeDegrees);
+  const handoffProgress = Math.max(longitudeProgress, latitudeProgress);
+
+  return handoffProgress > 0.01 ? playHandoffDurationMs : 0;
+}
+
+function waitForPlaybackHandoff(startedAt: number, duration: number): Promise<void> {
+  const remaining = Math.max(0, duration - (performance.now() - startedAt));
+  if (remaining <= 0) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, remaining);
+  });
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -1212,7 +1270,7 @@ function getGlobeRotation(offset: number): GlobeRotation {
   const scoreLongitude = getGlobeCycleLongitude(offset);
   return {
     longitude: normalizeLongitude(-scoreLongitude + globeView.manualLongitude + globeView.idleLongitude),
-    latitude: clamp(globeView.manualLatitude + globeView.melodyLatitude, -45, 45)
+    latitude: clamp(globeView.manualLatitude + globeView.melodyLatitude + globeView.idleLatitude, -45, 45)
   };
 }
 
@@ -1502,6 +1560,7 @@ function projectGlobePoint(longitude: number, latitude: number, rotation: GlobeR
 }
 
 function startGlobeFrameLoop(): void {
+  if (!globeCanvas || !globeContext || !globeProjection) return;
   if (globeFrameTimer) return;
 
   resizeGlobeCanvas();
@@ -1519,12 +1578,20 @@ function stopGlobeFrameLoop(): void {
 
 function renderGlobeAnimationFrame(frameTime: number): void {
   const isActiveMotion =
-    globeView.isDragging || isPlaying || Math.abs(globeView.velocityLongitude) > 0.002 || Math.abs(globeView.velocityLatitude) > 0.002;
+    globeView.isDragging ||
+    isPlaying ||
+    isPlaybackStarting ||
+    isIdleGlobeMotionActive() ||
+    Math.abs(normalizeLongitude(globeView.idleLongitude)) > 0.002 ||
+    Math.abs(globeView.idleLatitude) > 0.002 ||
+    Math.abs(globeView.velocityLongitude) > 0.002 ||
+    Math.abs(globeView.velocityLatitude) > 0.002;
   if (!isActiveMotion && frameTime - lastGlobeRenderTime < 84) return;
 
   const deltaSeconds = clamp((frameTime - globeView.lastFrameTime) / 1000, 0, 0.08);
   globeView.lastFrameTime = frameTime;
   lastGlobeRenderTime = frameTime;
+  updateIdleGlobeMotion(deltaSeconds);
 
   if (!globeView.isDragging && (Math.abs(globeView.velocityLongitude) > 0.002 || Math.abs(globeView.velocityLatitude) > 0.002)) {
     globeView.manualLongitude = normalizeLongitude(globeView.manualLongitude + globeView.velocityLongitude * deltaSeconds * 60);
@@ -1547,10 +1614,25 @@ function renderGlobeAnimationFrame(frameTime: number): void {
 function isGlobeMotionActive(): boolean {
   return (
     isPlaying ||
+    isPlaybackStarting ||
+    isIdleGlobeMotionActive() ||
     globeView.isDragging ||
+    Math.abs(normalizeLongitude(globeView.idleLongitude)) > 0.002 ||
+    Math.abs(globeView.idleLatitude) > 0.002 ||
     Math.abs(globeView.melodyLatitude) > 0.002 ||
     Math.abs(globeView.velocityLongitude) > 0.002 ||
     Math.abs(globeView.velocityLatitude) > 0.002
+  );
+}
+
+function isIdleGlobeMotionActive(): boolean {
+  return (
+    isPageRevealed &&
+    !prefersReducedMotion &&
+    !isPlaying &&
+    !isPlaybackStarting &&
+    !document.hidden &&
+    pageShell?.dataset.view !== 'portfolio'
   );
 }
 
@@ -1829,6 +1911,9 @@ function stopPlayback(): void {
   scoreVisualStartOffset = pausedCycleOffset;
   if (playButton) playButton.textContent = 'Play';
   refreshScoreLayout();
+  if (isIdleGlobeMotionActive()) {
+    startGlobeFrameLoop();
+  }
 }
 
 function scheduleSampledPianoTone(context: AudioContext, note: string, start: number, duration: number, gainValue: number): boolean {
@@ -2014,14 +2099,24 @@ async function playDisplayedMoonlight(): Promise<void> {
   }
 
   const context = ensureAudioContext();
-  const resumeOffset = pausedCycleOffset;
+  const resumeOffset = 0;
+  pausedCycleOffset = resumeOffset;
+  scoreVisualStartOffset = resumeOffset;
+  scoreVisualStartTime = 0;
   isPlaybackStarting = true;
   if (playButton) playButton.textContent = 'Stop';
+  const handoffStartedAt = performance.now();
+  const handoffDuration = getPlaybackHandoffDuration();
+  clearNoteHighlights();
+  renderScoreGlobe(resumeOffset);
+  startGlobeFrameLoop();
   await context.resume();
   await scoreRenderPromise;
   await loadPianoSamples(context);
+  await waitForPlaybackHandoff(handoffStartedAt, handoffDuration);
   if (!isPlaybackStarting) return;
 
+  resetIdleGlobeMotion();
   const cycleStart = context.currentTime + 0.06;
   const cycleDuration = getMoonlightCycleDuration();
   const nextStart = scheduleMoonlightCycle(context, cycleStart, resumeOffset);
@@ -2036,6 +2131,9 @@ function showPortfolio(): void {
   const nextView = pageShell.dataset.view === 'portfolio' ? 'music' : 'portfolio';
   pageShell.dataset.view = nextView;
   portfolioView.setAttribute('aria-hidden', nextView === 'portfolio' ? 'false' : 'true');
+  if (nextView === 'music' && isIdleGlobeMotionActive()) {
+    startGlobeFrameLoop();
+  }
 }
 
 function startInitialTitleTyping(): Promise<void> {
@@ -2096,6 +2194,7 @@ function revealLoadedPage(): void {
     introTitle.classList.add('is-typing');
   }
   pageShell?.removeAttribute('data-loading');
+  isPageRevealed = true;
 }
 
 createPortfolioList();
@@ -2104,7 +2203,12 @@ scoreRenderPromise = renderGlobeScore()
   .then(async () => {
     await waitForInitialTitleTyping();
     revealLoadedPage();
-    window.requestAnimationFrame(refreshScoreLayout);
+    window.requestAnimationFrame(() => {
+      refreshScoreLayout();
+      if (isIdleGlobeMotionActive()) {
+        startGlobeFrameLoop();
+      }
+    });
   })
   .catch((error: unknown) => {
     console.error(error);
@@ -2116,11 +2220,26 @@ reducedMotionQuery.addEventListener('change', (event) => {
 
   if (prefersReducedMotion) {
     globeView.melodyLatitude = 0;
+    resetIdleGlobeMotion();
   }
 
-  if (prefersReducedMotion && !isPlaying && !globeView.isDragging) {
+  if (isIdleGlobeMotionActive()) {
+    startGlobeFrameLoop();
+  } else if (prefersReducedMotion && !isPlaying && !globeView.isDragging) {
     stopGlobeFrameLoop();
     renderCurrentGlobeFrame();
+  }
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (!isPlaying && !globeView.isDragging) {
+      stopGlobeFrameLoop();
+    }
+    return;
+  }
+
+  if (isIdleGlobeMotionActive() || isPlaying || globeView.isDragging) {
+    startGlobeFrameLoop();
   }
 });
 window.addEventListener('resize', () => {
