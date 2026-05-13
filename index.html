@@ -25,42 +25,11 @@
       name="twitter:description"
       content="Alex Nicita's personal venture investments. Venture capital for frontier technologies."
     />
-    <meta name="theme-color" content="#e7e3dd" />
+    <meta name="theme-color" content="#07090d" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="./src/styles.css" />
   </head>
   <body>
-    <div class="page-shell" data-view="music" data-loading="true">
-      <header class="intro">
-        <em><a href="/" aria-label="Keyboard VC"><strong class="intro-title" data-title="Keyboard VC"></strong></a></em>
-        <br />
-      </header>
-
-      <main>
-        <section
-          class="music-view"
-          aria-label="Moonlight Sonata third movement score art"
-        >
-          <div class="score-circle" aria-hidden="true">
-            <div id="long-score" class="long-score"></div>
-          </div>
-        </section>
-
-        <section class="portfolio-view" aria-hidden="true">
-          <ul id="portfolio-list" class="portfolio-list"></ul>
-          <p class="portfolio-disclaimer">*these are angel investments made by Alex Nicita DBA keyboardvc.com</p>
-        </section>
-
-        <button id="play-button" class="play-button" type="button">Play</button>
-      </main>
-
-      <button id="portfolio-button" class="portfolio-button" type="button">
-        <span>Show</span>
-        Portfolio
-      </button>
-      <div class="copyright">© 2026</div>
-    </div>
-
-    <script type="module" src="./src/main.ts"></script>
+    <div id="root"></div>
+    <script type="module" src="./src/main.tsx"></script>
   </body>
 </html>

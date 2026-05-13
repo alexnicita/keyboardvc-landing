@@ -170,7 +170,7 @@ const moonlightTempo = 156;
 const sixteenthDuration = 60 / moonlightTempo / 4;
 const scoreLoopPause = 0.82;
 const initialTitleTypingDuration = 1650;
-const initialTitleFinalHoldDuration = 520;
+const initialTitleFinalHoldDuration = 1450;
 const scoreMeasureWidth = 468;
 const scoreTextureSourceHeight = 286;
 const scoreTextureHorizontalPadding = 260;
@@ -232,12 +232,15 @@ let scoreRenderPromise: Promise<void> | null = null;
 
 const playButton = document.querySelector<HTMLButtonElement>('#play-button');
 const portfolioButton = document.querySelector<HTMLButtonElement>('#portfolio-button');
+const playButtonLabel = document.querySelector<HTMLElement>('[data-play-label]');
+const portfolioButtonLabel = document.querySelector<HTMLElement>('[data-portfolio-label]');
 const pageShell = document.querySelector<HTMLElement>('.page-shell');
 const portfolioView = document.querySelector<HTMLElement>('.portfolio-view');
 const portfolioList = document.querySelector<HTMLUListElement>('#portfolio-list');
 const scoreCircle = document.querySelector<HTMLElement>('.score-circle');
 const scoreMount = document.querySelector<HTMLElement>('#long-score');
 const introTitle = document.querySelector<HTMLElement>('.intro-title');
+const brandLine = document.querySelector<HTMLElement>('.brand-line');
 const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 let audioContext: AudioContext | null = null;
@@ -318,6 +321,31 @@ function createPortfolioList(): void {
   });
 }
 
+function setPlayButtonState(active: boolean): void {
+  if (playButtonLabel) {
+    playButtonLabel.textContent = active ? 'Pause' : 'Play';
+  } else if (playButton) {
+    playButton.textContent = active ? 'Pause' : 'Play';
+  }
+
+  playButton?.setAttribute('aria-label', active ? 'Pause' : 'Play');
+  playButton?.setAttribute('aria-pressed', active ? 'true' : 'false');
+}
+
+function setPortfolioButtonState(active: boolean): void {
+  if (portfolioButtonLabel) {
+    portfolioButtonLabel.textContent = active ? 'Globe' : 'Portfolio';
+  } else if (portfolioButton) {
+    portfolioButton.textContent = active ? 'Globe' : 'Portfolio';
+  }
+
+  portfolioButton?.setAttribute('aria-pressed', active ? 'true' : 'false');
+}
+
+function revealBrandLine(): void {
+  brandLine?.classList.add('is-visible');
+}
+
 async function renderGlobeScore(): Promise<void> {
   if (!scoreCircle || !scoreMount) return;
 
@@ -395,8 +423,8 @@ function createGlobeWebGLState(canvas: HTMLCanvasElement): GlobeWebGLState | nul
     out vec4 outColor;
 
     const float PI = 3.141592653589793;
-    const vec3 PAGE_COLOR = vec3(231.0 / 255.0, 227.0 / 255.0, 221.0 / 255.0);
-    const vec3 ORB_COLOR = vec3(252.0 / 255.0, 251.0 / 255.0, 248.0 / 255.0);
+    const vec3 PAGE_COLOR = vec3(206.0 / 255.0, 199.0 / 255.0, 189.0 / 255.0);
+    const vec3 ORB_COLOR = vec3(224.0 / 255.0, 219.0 / 255.0, 211.0 / 255.0);
 
     float smootherStep(float value) {
       float x = clamp(value, 0.0, 1.0);
@@ -425,7 +453,8 @@ function createGlobeWebGLState(canvas: HTMLCanvasElement): GlobeWebGLState | nul
       float whiteBody = 0.62 * bodyBlend;
       float light = mix(1.0, clamp(0.996 + depth * 0.016 - normalized.x * 0.003 + normalized.y * 0.002, 0.99, 1.014), bodyBlend);
       vec3 orbBase = mix(PAGE_COLOR, ORB_COLOR, whiteBody) * light;
-      vec4 base = vec4(orbBase, 1.0);
+      float globeAlpha = mix(0.86, 0.97, smootherStep((depth - 0.08) / 0.76));
+      vec4 base = vec4(orbBase, globeAlpha);
 
       float staffAlpha = 0.0;
       if (depth > 0.12) {
@@ -1279,10 +1308,10 @@ function drawGlobeBackground(context: CanvasRenderingContext2D, path: ReturnType
   const radius = globeSize * (0.5 - globeSpherePadding);
   const gradient = context.createRadialGradient(center - radius * 0.34, center - radius * 0.42, radius * 0.08, center, center, radius * 1.05);
 
-  gradient.addColorStop(0, 'rgba(255, 255, 255, 0.52)');
-  gradient.addColorStop(0.44, 'rgba(252, 251, 248, 0.24)');
-  gradient.addColorStop(0.72, 'rgba(231, 227, 221, 0)');
-  gradient.addColorStop(1, 'rgba(231, 227, 221, 0)');
+  gradient.addColorStop(0, 'rgba(226, 220, 210, 0.42)');
+  gradient.addColorStop(0.44, 'rgba(214, 207, 196, 0.22)');
+  gradient.addColorStop(0.72, 'rgba(201, 195, 184, 0)');
+  gradient.addColorStop(1, 'rgba(201, 195, 184, 0)');
 
   context.save();
   context.beginPath();
@@ -1909,7 +1938,7 @@ function stopPlayback(): void {
   clearNoteHighlights();
   scoreVisualStartTime = 0;
   scoreVisualStartOffset = pausedCycleOffset;
-  if (playButton) playButton.textContent = 'Play';
+  setPlayButtonState(false);
   refreshScoreLayout();
   if (isIdleGlobeMotionActive()) {
     startGlobeFrameLoop();
@@ -2104,7 +2133,7 @@ async function playDisplayedMoonlight(): Promise<void> {
   scoreVisualStartOffset = resumeOffset;
   scoreVisualStartTime = 0;
   isPlaybackStarting = true;
-  if (playButton) playButton.textContent = 'Stop';
+  setPlayButtonState(true);
   const handoffStartedAt = performance.now();
   const handoffDuration = getPlaybackHandoffDuration();
   clearNoteHighlights();
@@ -2130,6 +2159,7 @@ function showPortfolio(): void {
   if (!pageShell || !portfolioView) return;
   const nextView = pageShell.dataset.view === 'portfolio' ? 'music' : 'portfolio';
   pageShell.dataset.view = nextView;
+  setPortfolioButtonState(nextView === 'portfolio');
   portfolioView.setAttribute('aria-hidden', nextView === 'portfolio' ? 'false' : 'true');
   if (nextView === 'music' && isIdleGlobeMotionActive()) {
     startGlobeFrameLoop();
@@ -2145,6 +2175,7 @@ function startInitialTitleTyping(): Promise<void> {
 
   if (prefersReducedMotion) {
     introTitle.textContent = title;
+    revealBrandLine();
     initialTitleCompleteTime = performance.now();
     initialTitleTypingPromise = Promise.resolve();
     return initialTitleTypingPromise;
@@ -2161,6 +2192,7 @@ function startInitialTitleTyping(): Promise<void> {
       introTitle.textContent = title.slice(0, index);
 
       if (index >= title.length) {
+        revealBrandLine();
         initialTitleCompleteTime = performance.now();
         resolve();
         return;
@@ -2189,18 +2221,27 @@ async function waitForInitialTitleTyping(): Promise<void> {
 }
 
 function revealLoadedPage(): void {
+  if (isPageRevealed) return;
+
   if (introTitle) {
     introTitle.textContent = introTitle.dataset.title ?? 'Keyboard VC';
     introTitle.classList.add('is-typing');
   }
+  revealBrandLine();
   pageShell?.removeAttribute('data-loading');
   isPageRevealed = true;
 }
 
 createPortfolioList();
+setPlayButtonState(false);
+setPortfolioButtonState(false);
 void startInitialTitleTyping();
+const revealFallbackTimer = window.setTimeout(() => {
+  void waitForInitialTitleTyping().then(revealLoadedPage);
+}, 4200);
 scoreRenderPromise = renderGlobeScore()
   .then(async () => {
+    window.clearTimeout(revealFallbackTimer);
     await waitForInitialTitleTyping();
     revealLoadedPage();
     window.requestAnimationFrame(() => {
