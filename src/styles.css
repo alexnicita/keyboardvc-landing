@@ -494,8 +494,10 @@ button:not([data-slot="button"]):focus-visible {
 }
 
 .portfolio-list li {
-  display: inline;
+  display: inline-flex;
+  align-items: baseline;
   max-width: 100%;
+  white-space: nowrap;
 }
 
 .portfolio-list a {
@@ -515,8 +517,7 @@ button:not([data-slot="button"]):focus-visible {
 }
 
 .portfolio-list li:not(:last-child)::after {
-  content: "/";
-  margin-left: 0.38em;
+  content: "\00a0/";
   font-family: var(--font-ogg-regular-italic);
   font-style: italic;
 }
