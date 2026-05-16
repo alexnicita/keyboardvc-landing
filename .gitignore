@@ -6,3 +6,10 @@ dist/
 !.env.example
 .vercel/
 .playwright-cli/
+
+# Generated output artifacts
+output/**/*.html
+output/**/*.png
+output/**/*.jpg
+output/**/*.jpeg
+output/**/*.webp
