@@ -6,6 +6,7 @@ dist/
 !.env.example
 .vercel/
 .playwright-cli/
+scripts/
 
 # Generated output artifacts
 output/**/*.html
